@@ -1879,6 +1879,43 @@ function downloadJSONFile(filename, obj){
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
 
+// What's actually taking up the space — the storage-full warning names one
+// specific culprit (view snapshots), but on a real, long-used shop it might
+// not be the biggest thing in the workbook at all. This measures every
+// top-level collection independently so the Account tab can show which one
+// actually is, instead of everyone assuming it's the same thing every time.
+const WB_STORAGE_BREAKDOWN_KEYS = [
+  ['listings', 'Listings'],
+  ['snapshots', 'Restore points (saved before each push)'],
+  ['viewSnapshots', 'View/favorite history'],
+  ['keywordResearch', 'Keyword research'],
+  ['keywordQueue', 'Keyword queue'],
+  ['pushLog', 'Push log'],
+  ['dailyLog', 'Daily performance log'],
+  ['sessionCloseout', 'Session closeout'],
+  ['completionCheck', 'Completion check'],
+  ['audit', 'SEO audit (seed data)'],
+  ['aiTestLog', 'AI test log'],
+  ['projects', 'Projects'],
+  ['shopSections', 'Shop sections'],
+  ['baselines', 'Shop baselines'],
+  ['skuIssues', 'SKU issue checks'],
+  ['shopProfile', 'Etsy shop profile stats'],
+  ['aiRules', 'Playbook / AI rules text'],
+  ['meta', 'Settings & shop meta'],
+];
+function workbookStorageBreakdown(){
+  const rows = WB_STORAGE_BREAKDOWN_KEYS.map(([key,label])=>{
+    const val = WB[key];
+    const bytes = (val===undefined || val===null) ? 0 : JSON.stringify(val).length;
+    const count = Array.isArray(val) ? val.length : null;
+    return { key, label, bytes, count };
+  }).sort((a,b)=>b.bytes-a.bytes);
+  const totalBytes = JSON.stringify(WB).length;
+  const accountedBytes = rows.reduce((s,r)=>s+r.bytes,0);
+  return { rows, totalBytes, otherBytes: Math.max(0, totalBytes-accountedBytes) };
+}
+
 // The real "export a backup" — exportWorkbook() below only writes what fits
 // a spreadsheet (listings, completion, closeout), the same fields
 // handleImportFile() reads back. Keyword research, view/favorite history,
@@ -6704,7 +6741,21 @@ async function renderAccount(){
     }
   }
 
-  html += `<div class="section-title" style="margin-top:30px;"><span class="left">Full backup file — "${escapeHtml(currentProfile().label)}"</span></div>
+  const bd = workbookStorageBreakdown();
+  html += `<div class="section-title" style="margin-top:30px;"><span class="left">What's using the space</span></div>
+  <div class="section-note">${(bd.totalBytes/1048576).toFixed(2)} MB total in "${escapeHtml(currentProfile().label)}" right now, broken down by what's actually in it — the storage-full warning only ever names view snapshots, but that's not always the real cause.</div>
+  <div class="card-scroll" style="max-height:320px; margin-bottom:20px;"><table class="simple-table">
+    <thead><tr><th>What</th><th>Size</th><th>Rows</th></tr></thead>
+    <tbody>${bd.rows.filter(r=>r.bytes>0).map(r=>`<tr>
+      <td class="small">${escapeHtml(r.label)}</td>
+      <td class="small">${(r.bytes/1024).toFixed(1)} KB</td>
+      <td class="small">${r.count==null?'—':r.count}</td>
+    </tr>`).join('') || '<tr><td colspan="3" class="small">Nothing measurable yet.</td></tr>'}
+    ${bd.otherBytes>512 ? `<tr><td class="small">Other (structure overhead, small fields)</td><td class="small">${(bd.otherBytes/1024).toFixed(1)} KB</td><td class="small">—</td></tr>` : ''}
+    </tbody>
+  </table></div>
+
+  <div class="section-title" style="margin-top:30px;"><span class="left">Full backup file — "${escapeHtml(currentProfile().label)}"</span></div>
   <div class="section-note">A complete .json snapshot of this shop — not just listings, but keyword research, view/favorite history, projects, restore points, push log, and Playbook edits. This is the real "export a backup" the storage-full warning points to; the Export workbook button (top bar) only covers what fits a spreadsheet. Works with or without being signed in.</div>
   <div style="display:flex; gap:8px; flex-wrap:wrap;">
     <button class="btn" id="downloadFullBackupBtn">Download full backup (.json)</button>
