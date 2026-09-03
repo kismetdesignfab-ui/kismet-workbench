@@ -834,6 +834,7 @@ function seedWorkbook(){
       row: l.row, sku: l.sku, status: l.status, priority: l.priority,
       oldTitle: l.title, proposedTitle: '', description: '',
       tags: (l.tags||'').split(',').map(t=>t.trim()).filter(Boolean),
+      oldTags: (l.tags||'').split(',').map(t=>t.trim()).filter(Boolean),
       price: l.price, pk: l.pk, sk: l.sk,
       infographic: l.infographic || null,        // null | 'DONE' | 'NOT NEEDED' | 'NEEDED'
       googleSeo: l.googleSeo, notes: l.notes,
@@ -1278,6 +1279,14 @@ async function loadState(){
   WB.listings.forEach(l=>{
     if(l.productType===undefined) l.productType = 'digital';
     if(!l.verifiedFacts) l.verifiedFacts = { formats:[], dimensions:'', kerf:'', personalization:'', materials:'', productionTime:'' };
+    // oldTags mirrors what's live on Etsy, same role oldTitle/oldDescription
+    // already play — added so tags stop getting silently overwritten by
+    // background Etsy syncs (see the Etsy-sync code) and so the drawer can
+    // show a real live-vs-draft comparison. Existing listings have no
+    // recorded history, so the best available starting point is "whatever
+    // tags are stored now" — the next Etsy sync will move oldTags to the
+    // true live value from there.
+    if(l.oldTags===undefined) l.oldTags = (l.tags||[]).slice();
   });
   if(WB.meta.pushPassword === undefined) WB.meta.pushPassword = '';
   // One-time cleanup: titles/descriptions/tags pulled from Etsy before the
@@ -1832,6 +1841,7 @@ async function handleImportFile(file){
         status: r['Status']||'NOT REVIEWED', priority: r['Priority']||null,
         oldTitle: r['Current Title']||'', proposedTitle:'', description:'',
         tags: String(r['Current Tags']||'').split(',').map(t=>t.trim()).filter(Boolean),
+        oldTags: String(r['Current Tags']||'').split(',').map(t=>t.trim()).filter(Boolean),
         price: r['Price'], pk: r['Primary Keyword']||null, sk: r['Secondary Keywords']||null,
         infographic: r['Infographic Needed / Done']||null,
         googleSeo: r['Google SEO Checked']||'No', notes: r['Performance / Notes']||null,
@@ -2695,6 +2705,16 @@ async function closeDrawerChecked(l){
 
 function closeDrawer(){ document.getElementById('overlay').classList.remove('open'); }
 
+// Sits directly above each editable field in the drawer so what's live on
+// Etsy and what you're about to write are never more than a glance apart —
+// previously "old title" lived in its own card near the top of the drawer,
+// separated from "proposed title" by two other full sections, and
+// description/tags had no live reference shown anywhere at all.
+function liveNowCompare(text, maxHeight){
+  return `<div class="k" style="margin-bottom:4px;">LIVE ON ETSY NOW</div>
+  <div class="ws-text old" style="margin-bottom:10px; padding:8px 10px; background:var(--panel-2); border-radius:var(--r-sm);${maxHeight?` max-height:${maxHeight}px; overflow-y:auto;`:''}">${text ? escapeHtml(text) : '—'}</div>`;
+}
+
 function renderDrawer(l){
   const drawer = document.getElementById('drawer');
   const gates = computeGates(l);
@@ -2711,9 +2731,7 @@ function renderDrawer(l){
 
     <div class="ws-block">
       <div class="ws-lbl"><span>SKU</span>${copyBtn('sku')}</div>
-      <div class="ws-text mono" style="font-size:15px; font-weight:600; letter-spacing:0.06em; margin-bottom:14px;">${escapeHtml(l.sku)}</div>
-      <div class="ws-lbl"><span>Exact old title (live on Etsy now)</span></div>
-      <div class="ws-text old">${escapeHtml(l.oldTitle) || '—'}</div>
+      <div class="ws-text mono" style="font-size:15px; font-weight:600; letter-spacing:0.06em;">${escapeHtml(l.sku)}</div>
       ${l.etsyLastModified ? `<div class="section-note" style="margin:6px 0 0 0;">Last modified on Etsy: ${etsyDaysAgo(l.etsyLastModified)}${l.etsyUrl ? ` · <a href="${escapeHtml(l.etsyUrl)}" target="_blank" style="color:var(--steel)">View on Etsy →</a>` : ''}</div>` : ''}
     </div>
 
@@ -2752,18 +2770,21 @@ function renderDrawer(l){
 
     <div class="ws-block">
       <div class="ws-lbl"><span>Proposed title</span>${copyBtn('title')}<button class="copy-btn" data-aigen="title" style="margin-left:8px;">\u2726 Generate with AI</button></div>
+      ${liveNowCompare(l.oldTitle)}
       <textarea id="edProposedTitle" placeholder="New title to paste into Etsy…" style="min-height:44px;">${escapeHtml(l.proposedTitle)}</textarea>
       <div id="aiGenResult_title"></div>
     </div>
 
     <div class="ws-block">
       <div class="ws-lbl"><span>Description</span>${copyBtn('desc')}<button class="copy-btn" data-aigen="description" style="margin-left:8px;">\u2726 Generate with AI</button></div>
+      ${liveNowCompare(l.oldDescription, 120)}
       <textarea id="edDescription" placeholder="Full listing description…">${escapeHtml(l.description)}</textarea>
       <div id="aiGenResult_description"></div>
     </div>
 
     <div class="ws-block">
       <div class="ws-lbl"><span>Tags (${l.tags.length}/13)</span>${copyBtn('tags')}<button class="copy-btn" data-aigen="tags" style="margin-left:8px;">\u2726 Generate with AI</button></div>
+      ${liveNowCompare((l.oldTags||[]).join(', '))}
       <div id="tagsEditArea"></div>
       <button class="btn" id="addTagBtn" style="margin-top:6px;">+ Add tag</button>
       <div class="tags-summary" id="tagsSummary"></div>
@@ -6120,9 +6141,13 @@ async function pushListingToEtsy(l, project){
       return { ok:false, message:`Etsy rejected the update (HTTP ${res.status}): ${t.slice(0,300)}` };
     }
     const data = await res.json();
-    // Trust Etsy's response over our own assumption of what happened.
+    // Trust Etsy's response over our own assumption of what happened. Also
+    // syncs the "live" reference fields (oldTitle/oldDescription/oldTags) to
+    // match, not just the draft — otherwise the compare view would keep
+    // showing a stale diff against a version of Etsy that's already gone.
     if(data.title) l.oldTitle = decodeHtmlEntities(data.title);
-    if(data.tags) l.tags = data.tags.map(t=>decodeHtmlEntities(t));
+    if(data.description !== undefined) l.oldDescription = decodeHtmlEntities(data.description);
+    if(data.tags){ l.tags = data.tags.map(t=>decodeHtmlEntities(t)); l.oldTags = l.tags.slice(); }
     if(data.shop_section_id !== undefined) l.shopSectionId = data.shop_section_id;
     l.etsyLastModified = data.last_modified_timestamp || l.etsyLastModified;
     l.liveDate = todayISO;
@@ -6166,7 +6191,8 @@ async function restoreListing(l, snap){
     }
     const data = await res.json();
     if(data.title) l.oldTitle = decodeHtmlEntities(data.title);
-    if(data.tags) l.tags = data.tags.map(t=>decodeHtmlEntities(t));
+    if(data.description !== undefined) l.oldDescription = decodeHtmlEntities(data.description);
+    if(data.tags){ l.tags = data.tags.map(t=>decodeHtmlEntities(t)); l.oldTags = l.tags.slice(); }
     l.etsyLastModified = data.last_modified_timestamp || l.etsyLastModified;
     await persistWorkbook();
     return { ok:true, message:`Restored to the version saved on ${snap.takenAt.slice(0,10)}.` };
@@ -6412,7 +6438,7 @@ async function importFromEtsy(silent){
           // below — "Etsy shows a change" is useless without saying what.
           const changedFields = [];
           if((item.title||'') !== (existing.oldTitle||'')) changedFields.push({ field:'Title', from:existing.oldTitle||'(empty)', to:item.title||'(empty)' });
-          const oldTagsStr = (existing.tags||[]).join(', '), newTagsStr = (item.tags||[]).join(', ');
+          const oldTagsStr = (existing.oldTags||existing.tags||[]).join(', '), newTagsStr = (item.tags||[]).join(', ');
           if(oldTagsStr !== newTagsStr) changedFields.push({ field:'Tags', from:oldTagsStr||'(none)', to:newTagsStr||'(none)' });
           const newPrice = item.price && item.price.amount!=null ? (item.price.amount/(item.price.divisor||100)).toFixed(2) : null;
           if(newPrice!=null && String(newPrice)!==String(existing.price)) changedFields.push({ field:'Price', from:`$${existing.price}`, to:`$${newPrice}` });
@@ -6422,7 +6448,13 @@ async function importFromEtsy(silent){
         }
         existing.oldTitle = item.title;
         existing.oldDescription = item.description || existing.oldDescription || '';
-        existing.tags = item.tags || existing.tags;
+        // oldTags mirrors Etsy on every sync, same as oldTitle/oldDescription
+        // above. `tags` itself is deliberately NOT touched here — it's the
+        // draft you edit, same as proposedTitle/description, and syncing it
+        // from Etsy on every import (including the silent one that runs
+        // whenever the app opens) used to silently overwrite in-progress tag
+        // edits that hadn't been pushed yet.
+        existing.oldTags = item.tags || existing.oldTags || [];
         existing.price = price;
         existing.etsyListingId = item.listing_id;
         existing.etsyState = item.state;
@@ -6435,7 +6467,7 @@ async function importFromEtsy(silent){
         const fresh = {
           row: null, sku, status:'NOT REVIEWED', priority:null,
           oldTitle: item.title, oldDescription: item.description || '', proposedTitle:'', description:'',
-          tags: item.tags || [], price, pk:null, sk:null,
+          tags: item.tags || [], oldTags: item.tags || [], price, pk:null, sk:null,
           infographic:null, googleSeo:'No', notes:null,
           liveDate, fbStatus:'NOT_POSTED', fbDate:null, fbLink:null,
           isDraft:false, pendingDraft:false, draftStatus:null, draftCategory:null, draftNote:null,
