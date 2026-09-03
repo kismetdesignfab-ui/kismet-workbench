@@ -1291,6 +1291,7 @@ async function loadState(){
 async function persistWorkbook(){
   const payload = JSON.stringify(WB);
   const key = wbKeyFor(activeProfileId);
+  let ok = false;
   try{
     const res = await appStorage.set(key, payload);
     if(!res){
@@ -1299,16 +1300,20 @@ async function persistWorkbook(){
       // data is still intact — localStorage never deletes on a failed
       // write — but nothing NEW is being kept until space is freed.
       showStorageWarning(payload.length);
-      return false;
+    } else {
+      const check = await appStorage.get(key);
+      ok = !!check && check.value === payload;
+      if(!ok) showStorageWarning(payload.length);
     }
-    const check = await appStorage.get(key);
-    if(!check || check.value !== payload){ showStorageWarning(payload.length); return false; }
-    return true;
   }catch(e){
     console.error('workbook save failed', e);
     showStorageWarning(payload.length);
-    return false;
   }
+  // Cloud backup is independent of the local write above — WB in memory is
+  // intact even when the local save just failed, so a signed-in account's
+  // cloud copy matters most exactly when local storage is the problem.
+  scheduleCloudSync();
+  return ok;
 }
 function showStorageWarning(size){
   if(document.getElementById('storageWarnBanner')) return; // don't stack
@@ -1613,6 +1618,22 @@ function renderProfileSwitcher(){
   });
 }
 
+function cloudSyncLabel(){
+  switch(cloudSyncState.status){
+    case 'pending': return 'saving soon…';
+    case 'syncing': return 'backing up…';
+    case 'error':   return 'backup failed';
+    case 'ok': {
+      const mins = Math.round((Date.now() - cloudSyncState.lastSyncedAt) / 60000);
+      if(mins < 1) return 'backed up just now';
+      if(mins < 60) return `backed up ${mins}m ago`;
+      const hrs = Math.round(mins/60);
+      if(hrs < 24) return `backed up ${hrs}h ago`;
+      return `backed up ${Math.round(hrs/24)}d ago`;
+    }
+    default: return 'not backed up yet';
+  }
+}
 function updateMiniGauge(){
   const all = WB.listings.filter(l=>!l.isDraft);
   const done = all.filter(l => l.status && l.status.startsWith('UPDATED')).length;
@@ -1632,8 +1653,12 @@ function updateMiniGauge(){
   const acctLine = currentUser
     ? `<div class="sync-pill synced" style="margin:0;"><span class="dot"></span> Account: signed in</div>`
     : `<div class="sync-pill stale" style="margin:0;"><span class="dot"></span> Account: signed out</div>`;
+  // Only meaningful once signed in — with no account, nothing to back up to.
+  const cloudLine = currentUser
+    ? `<div class="sync-pill ${cloudSyncState.status==='ok'?'synced':'stale'}" style="margin:6px 0 0 0;"><span class="dot"></span> Cloud: ${cloudSyncLabel()}</div>`
+    : '';
   syncEl.className = '';
-  syncEl.innerHTML = shopLine + acctLine;
+  syncEl.innerHTML = shopLine + acctLine + cloudLine;
 }
 
 // ============================================================
@@ -6006,6 +6031,12 @@ let etsyImportResult = null;
 // the app is opened and it hasn't captured today yet; never a background
 // job, so it can't drain a phone.
 // ============================================================
+// Default retention for auto-captured view snapshots. Trend charts only ever
+// show the last 14 days (see viewHistoryFor callers), so 6 months is already
+// far more history than the app displays anywhere — it exists as a ceiling,
+// not a target. The Performance tab's manual controls can still trim tighter.
+const VIEW_SNAPSHOT_RETENTION_DAYS = 180;
+
 async function captureViewSnapshot(){
   if(!etsyAuth || !etsyAuth.shopId) return { ok:false, message:'Not connected to Etsy.' };
   const already = new Set(WB.viewSnapshots.filter(v=>v.date===todayISO).map(v=>v.sku));
@@ -6027,6 +6058,7 @@ async function captureViewSnapshot(){
       WB.viewSnapshots.push({ sku, date: todayISO, views: item.views ?? null, favorites: item.num_favorers ?? null });
       captured++;
     });
+    if(captured) clearViewSnapshots(VIEW_SNAPSHOT_RETENTION_DAYS);
     await persistWorkbook();
     return { ok:true, captured };
   }catch(e){
@@ -6312,7 +6344,15 @@ const SUPABASE_KEY = 'sb_publishable_Nf_K_LgBfz-wFJRY3H6ASg_wYCBa6d5';
 
 let sb = null;          // supabase client
 let currentUser = null; // { id, email } when signed in
-let syncStatus = null;  // last sync outcome shown in the UI
+let syncStatus = null;  // last sync outcome shown in the UI (Account tab)
+
+// Background cloud backup — mirrors every local save to the account, once
+// signed in, so a full local storage never means data only existed in one
+// place. 'idle' when signed out, 'pending' while a save is debounced,
+// 'syncing' mid-upload, 'ok'/'error' after the last attempt.
+let cloudSyncState = { status:'idle', lastSyncedAt:null };
+let cloudSyncTimer = null;
+let cloudSyncInFlight = false;
 
 function initSupabase(){
   try{
@@ -6392,6 +6432,34 @@ async function pushToCloud(){
     syncStatus = { ok:false, message:'Upload failed: '+e.message };
   }
   return syncStatus;
+}
+
+// Debounced auto-backup: called on every local save. Coalesces bursts of
+// edits (typing, bulk operations) into one upload a few seconds after
+// things go quiet, instead of hammering Supabase on every keystroke.
+function scheduleCloudSync(){
+  if(!currentUser) return;
+  cloudSyncState.status = 'pending';
+  updateMiniGauge();
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(runAutoCloudSync, 5000);
+}
+async function runAutoCloudSync(){
+  if(!currentUser || cloudSyncInFlight) return;
+  cloudSyncInFlight = true;
+  cloudSyncState.status = 'syncing';
+  updateMiniGauge();
+  try{
+    const r = await pushToCloud();
+    cloudSyncState.status = r && r.ok ? 'ok' : 'error';
+    if(r && r.ok) cloudSyncState.lastSyncedAt = Date.now();
+  }catch(e){
+    cloudSyncState.status = 'error';
+  }
+  cloudSyncInFlight = false;
+  updateMiniGauge();
+  const acctPage = document.getElementById('content');
+  if(acctPage && uiState.lastTab==='account') renderAccount();
 }
 
 // Lists what's in the cloud for this account, so you can pull a shop
@@ -6490,15 +6558,19 @@ async function renderAccount(){
   const inBtn = document.getElementById('signInBtn');
   if(inBtn) inBtn.addEventListener('click', async ()=>{
     const r = await signInWithEmail(document.getElementById('acctEmail').value.trim(), document.getElementById('acctPassword').value);
-    if(r.ok){ cloudShopsCache = await listCloudShops(); render(); } else flash(false, r.message);
+    if(r.ok){ cloudShopsCache = await listCloudShops(); scheduleCloudSync(); render(); } else flash(false, r.message);
   });
   const upBtn = document.getElementById('signUpBtn');
   if(upBtn) upBtn.addEventListener('click', async ()=>{
     const r = await signUpWithEmail(document.getElementById('acctEmail').value.trim(), document.getElementById('acctPassword').value);
-    if(r.ok && currentUser){ cloudShopsCache = await listCloudShops(); render(); } else flash(r.ok, r.message);
+    if(r.ok && currentUser){ cloudShopsCache = await listCloudShops(); scheduleCloudSync(); render(); } else flash(r.ok, r.message);
   });
   const outBtn = document.getElementById('signOutBtn');
-  if(outBtn) outBtn.addEventListener('click', async ()=>{ await signOutAccount(); cloudShopsCache=[]; syncStatus=null; render(); });
+  if(outBtn) outBtn.addEventListener('click', async ()=>{
+    await signOutAccount(); cloudShopsCache=[]; syncStatus=null;
+    clearTimeout(cloudSyncTimer); cloudSyncState = { status:'idle', lastSyncedAt:null };
+    render();
+  });
   const pushBtn = document.getElementById('pushCloudBtn');
   if(pushBtn) pushBtn.addEventListener('click', async ()=>{
     pushBtn.disabled = true; pushBtn.textContent = 'Backing up…';
