@@ -368,7 +368,7 @@ select.filt{
   background:var(--panel);
 }
 .trow{
-  display:grid; grid-template-columns:60px 104px 1fr 78px 92px 88px; align-items:center;
+  display:grid; grid-template-columns:24px 60px 104px 1fr 78px 92px 88px; align-items:center;
   padding:12px 18px; border-bottom:1px solid var(--line-soft); cursor:pointer;
   background:var(--panel); transition:background .1s ease;
 }
@@ -640,8 +640,8 @@ select.filt{
   .h1{ font-size:21px; }
   .grid-4{ grid-template-columns:repeat(2,1fr); }
   .grid-2{ grid-template-columns:1fr; }
-  .trow{ grid-template-columns:52px 1fr 76px; }
-  .trow > div:nth-child(4), .trow > div:nth-child(5), .trow > div:nth-child(6){ display:none; }
+  .trow{ grid-template-columns:24px 52px 1fr 76px; }
+  .trow > div:nth-child(5), .trow > div:nth-child(6), .trow > div:nth-child(7){ display:none; }
   .drawer{ width:100vw; padding:22px 18px; }
   .row2{ grid-template-columns:1fr; }
 }
@@ -2521,7 +2521,7 @@ function statusBadge(status){
 // ============================================================
 // LISTINGS
 // ============================================================
-let listState = { search:'', status:'ALL', project:'ALL', page:0, pageSize:25, sortCol:null, sortDir:'asc' };
+let listState = { search:'', status:'ALL', project:'ALL', page:0, pageSize:25, sortCol:null, sortDir:'asc', selected:[] };
 function filteredListings(){
   const s = listState.search.trim().toLowerCase();
   let rows = WB.listings.filter(l=>{
@@ -2558,6 +2558,9 @@ function renderListings(){
   listState.page = Math.min(listState.page, totalPages-1);
   const start = listState.page*listState.pageSize;
   const pageItems = filtered.slice(start, start+listState.pageSize);
+  const selected = listState.selected || (listState.selected=[]);
+  const pageSkus = pageItems.map(l=>l.sku);
+  const allOnPageSelected = pageSkus.length>0 && pageSkus.every(s=>selected.includes(s));
 
   let html = `<div class="toolbar">
     <input class="search" id="searchInput" placeholder="Search title, tags, SKU, keyword…" value="${escapeHtml(listState.search)}"/>
@@ -2573,8 +2576,10 @@ function renderListings(){
     </select>
     <span class="count-pill">${filtered.length} of ${WB.listings.filter(l=>!l.isDraft).length}</span>
   </div>
+  ${selected.length ? `<div class="banner" style="background:var(--panel-2); margin-bottom:12px;"><span class="mono">✓</span><span class="fill"><b>${selected.length}</b> selected</span><button id="listAddToProjectBtn">Add to project</button><button id="listClearSelBtn">Clear</button></div>` : ''}
   <div class="table-wrap">
     <div class="trow head">
+      <div><input type="checkbox" id="selectAllOnPage" ${allOnPageSelected?'checked':''} title="Select all on this page"/></div>
       <div class="sortable-h" data-sort="sku" style="cursor:pointer;">SKU${sortArrow('sku')}</div>
       <div class="sortable-h" data-sort="status" style="cursor:pointer;">STATUS${sortArrow('status')}</div>
       <div class="sortable-h" data-sort="title" style="cursor:pointer;">TITLE${sortArrow('title')}</div>
@@ -2584,6 +2589,7 @@ function renderListings(){
     </div>
     <div>${pageItems.map(l=>`
       <div class="trow" data-sku="${l.sku}">
+        <div><input type="checkbox" class="row-check" value="${l.sku}" ${selected.includes(l.sku)?'checked':''}/></div>
         <div class="c-sku">${l.sku}</div><div>${statusBadge(l.status)}</div>
         <div class="c-title">${escapeHtml(l.oldTitle)}</div><div class="c-price">$${l.price}</div>
         <div class="c-price">${l.etsyLastModified ? etsyDaysAgo(l.etsyLastModified) : '—'}</div>
@@ -2617,7 +2623,38 @@ function renderListings(){
   document.getElementById('prioFilt').addEventListener('change', e=>{ listState.project=e.target.value; listState.page=0; renderListings(); });
   document.getElementById('prevPg').addEventListener('click', ()=>{ listState.page--; renderListings(); });
   document.getElementById('nextPg').addEventListener('click', ()=>{ listState.page++; renderListings(); });
-  document.querySelectorAll('.trow[data-sku]').forEach(el=> el.addEventListener('click', ()=> openDrawer(el.dataset.sku)));
+  document.querySelectorAll('.trow[data-sku]').forEach(el=> el.addEventListener('click', (e)=>{
+    if(e.target.classList.contains('row-check')) return; // checking a box shouldn't also open the drawer
+    openDrawer(el.dataset.sku);
+  }));
+  // Selection state persists across page/filter changes — checked here so
+  // "select all", flip to another status filter, select more still adds up,
+  // instead of silently losing the first batch.
+  document.querySelectorAll('.row-check').forEach(cb=> cb.addEventListener('click', e=>{
+    e.stopPropagation();
+    const sku = cb.value;
+    if(cb.checked){ if(!listState.selected.includes(sku)) listState.selected.push(sku); }
+    else { listState.selected = listState.selected.filter(s=>s!==sku); }
+    renderListings();
+  }));
+  const selectAllEl = document.getElementById('selectAllOnPage');
+  if(selectAllEl) selectAllEl.addEventListener('click', ()=>{
+    if(selectAllEl.checked){
+      pageSkus.forEach(s=>{ if(!listState.selected.includes(s)) listState.selected.push(s); });
+    } else {
+      listState.selected = listState.selected.filter(s=>!pageSkus.includes(s));
+    }
+    renderListings();
+  });
+  const addToProjBtn = document.getElementById('listAddToProjectBtn');
+  if(addToProjBtn) addToProjBtn.addEventListener('click', ()=>{
+    projectState.pendingAssign = { skus: listState.selected.slice(), sourceLabel: 'Selected listings' };
+    listState.selected = [];
+    uiState.lastTab = 'projects'; saveUiState();
+    render();
+  });
+  const clearSelBtn = document.getElementById('listClearSelBtn');
+  if(clearSelBtn) clearSelBtn.addEventListener('click', ()=>{ listState.selected = []; renderListings(); });
 }
 
 // ============================================================
@@ -3749,6 +3786,11 @@ function renderProjects(){
           });
           const arrow = (col)=> sortCol===col ? (sortDir==='asc'?' \u25b2':' \u25bc') : '';
           const selected = projectState.pickerSelected || [];
+          // The full filtered set, not just the 200 rendered as checkboxes \u2014
+          // "select all" should mean all matches, so the picker's own
+          // handler below reads this instead of re-deriving the filter.
+          projectState.pickerCandidateSkus = candidates.map(l=>l.sku);
+          const allCandidatesSelected = candidates.length>0 && candidates.every(l=>selected.includes(l.sku));
           return `
         <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
           <div class="row2">
@@ -3762,7 +3804,7 @@ function renderProjects(){
           </div>
           <div class="section-note" style="margin:8px 0 6px 0;">${candidates.length} match${candidates.length===1?'':'es'} \u2014 ${selected.length} selected</div>
           ${candidates.length ? `<div style="display:flex; align-items:center; gap:10px; padding:6px 12px; font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--smoke-dim); text-transform:uppercase; letter-spacing:0.1em;">
-            <span style="width:16px;"></span>
+            <span style="width:16px;"><input type="checkbox" id="pickerSelectAll" ${allCandidatesSelected?'checked':''} title="Select all matches"/></span>
             <span data-pickersort="sku" style="width:50px; flex-shrink:0; cursor:pointer;">SKU${arrow('sku')}</span>
             <span data-pickersort="title" style="flex:1; cursor:pointer;">TITLE${arrow('title')}</span>
             <span style="flex-shrink:0;">SECTION</span>
@@ -3997,6 +4039,20 @@ function renderProjects(){
       note.textContent = `${count} match${count===1?'':'es'} — ${projectState.pickerSelected.length} selected`;
     }
   }));
+  const pickerSelectAllEl = document.getElementById('pickerSelectAll');
+  if(pickerSelectAllEl) pickerSelectAllEl.addEventListener('change', ()=>{
+    // Applies to every filtered match, not just the (up to 200) rendered as
+    // checkboxes — a shop with more matches than that should still be able
+    // to select all of them in one tap.
+    const all = projectState.pickerCandidateSkus || [];
+    const sel = projectState.pickerSelected || (projectState.pickerSelected=[]);
+    if(pickerSelectAllEl.checked){
+      all.forEach(s=>{ if(!sel.includes(s)) sel.push(s); });
+    } else {
+      projectState.pickerSelected = sel.filter(s=>!all.includes(s));
+    }
+    renderProjects();
+  });
   document.querySelectorAll('[data-addselected]').forEach(b=> b.addEventListener('click', async ()=>{
     const p = WB.projects.find(x=>x.id===b.dataset.addselected);
     const selected = projectState.pickerSelected || [];
