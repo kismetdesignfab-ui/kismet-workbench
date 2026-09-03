@@ -717,19 +717,99 @@ const SEED_BIGFOOT = [{"SKU":"0010","Exact Old Title":"Sasquatch Silhouette, Big
 
 // REAL STORAGE — window.storage only exists inside Claude's own artifact
 // preview; a Worker-hosted page has no such thing. This shim gives every
-// call site the same {value} shape but backs it with genuine browser
-// localStorage, which actually persists on any real host. Scope: one
-// browser, one device — no cross-device sync without a real backend.
+// call site the same {value} shape, backed by IndexedDB (not localStorage
+// — localStorage caps out around 5-10MB per origin depending on browser,
+// and a real, actively-used shop's workbook can exceed that on legitimate
+// content alone, with nothing to "clean up" because it's all real research
+// and listings. IndexedDB's quota is a share of available disk space —
+// hundreds of MB to GB — so this removes the ceiling instead of requiring
+// perpetual trimming of real data). Scope: one browser, one device — no
+// cross-device sync without a real backend (see the Account tab's cloud
+// backup for that).
+const IDB_NAME = 'kismet-storage-v1';
+const IDB_STORE = 'kv';
+let idbPromise = null;
+
+function openIdb(){
+  if(idbPromise) return idbPromise;
+  idbPromise = new Promise((resolve, reject)=>{
+    if(!window.indexedDB){ reject(new Error('IndexedDB not available in this browser')); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = ()=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = async ()=>{
+      const db = req.result;
+      try{ await migrateFromLocalStorage(db); }
+      catch(e){ console.error('localStorage -> IndexedDB migration failed', e); }
+      resolve(db);
+    };
+    req.onerror = ()=> reject(req.error);
+  });
+  return idbPromise;
+}
+function idbTxGet(db, key){
+  return new Promise((resolve, reject)=>{
+    const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+    req.onsuccess = ()=> resolve(req.result===undefined ? null : req.result);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+function idbTxSet(db, key, value){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = ()=> resolve();
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+function idbTxDelete(db, key){
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = ()=> resolve();
+    tx.onerror = ()=> reject(tx.error);
+  });
+}
+// One-time copy of anything already saved under the old localStorage
+// scheme, so upgrading to this never looks like data loss. Safe to run on
+// every load — a sentinel key skips it once it's already been done.
+// Deliberately doesn't clear localStorage afterward: leaving the old copy
+// in place costs nothing and is a free emergency fallback if IndexedDB
+// ever misbehaves for someone.
+async function migrateFromLocalStorage(db){
+  const done = await idbTxGet(db, '__migratedFromLocalStorage__');
+  if(done) return;
+  const tx = db.transaction(IDB_STORE, 'readwrite');
+  const store = tx.objectStore(IDB_STORE);
+  for(let i=0; i<localStorage.length; i++){
+    const key = localStorage.key(i);
+    const value = key===null ? null : localStorage.getItem(key);
+    if(key!==null && value!==null) store.put(value, key);
+  }
+  store.put('true', '__migratedFromLocalStorage__');
+  await new Promise((resolve, reject)=>{ tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error); });
+}
+
 const appStorage = {
   async get(key){
     try{
-      const v = localStorage.getItem(key);
-      return v === null ? null : { key, value: v };
-    }catch(e){ return null; }
+      const db = await openIdb();
+      const value = await idbTxGet(db, key);
+      return value === null ? null : { key, value };
+    }catch(e){ console.error('storage get failed', e); return null; }
   },
   async set(key, value){
-    try{ localStorage.setItem(key, value); return { key, value }; }
-    catch(e){ return null; }
+    try{
+      const db = await openIdb();
+      await idbTxSet(db, key, value);
+      return { key, value };
+    }catch(e){ console.error('storage set failed', e); return null; }
+  },
+  async remove(key){
+    try{ const db = await openIdb(); await idbTxDelete(db, key); return true; }
+    catch(e){ console.error('storage remove failed', e); return false; }
   },
 };
 
@@ -798,7 +878,8 @@ async function deleteProfile(id){
   profiles = profiles.filter(p=>p.id!==id);
   if(!profiles.length){ const nid = newProfileId(); profiles = [{ id:nid, label:'My Shop', createdDate: todayISO }]; }
   await appStorage.set(PROFILES_KEY, JSON.stringify(profiles));
-  try{ localStorage.removeItem(wbKeyFor(id)); localStorage.removeItem(etsyKeyFor(id)); }catch(e){}
+  await appStorage.remove(wbKeyFor(id));
+  await appStorage.remove(etsyKeyFor(id));
   if(activeProfileId===id) await setActiveProfile(profiles[0].id);
 }
 
