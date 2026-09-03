@@ -696,7 +696,7 @@ select.filt{
   <div class="drawer" id="drawer"></div>
 </div>
 <input type="file" id="importFileInput" accept=".xlsx" style="display:none"/>
-<input type="file" id="batchFileInput" accept=".json" style="display:none"/>
+<input type="file" id="batchFileInput" accept=".json,.xlsx,.xls,.csv" style="display:none"/>
 
 <script>
 
@@ -1321,10 +1321,13 @@ function showStorageWarning(size){
   const el = document.createElement('div');
   el.id = 'storageWarnBanner';
   el.style.cssText = 'position:fixed; bottom:16px; left:16px; right:16px; z-index:9999; max-width:640px; margin:0 auto;';
+  const cloudLine = currentUser
+    ? `Your account is signed in, so a cloud backup of this data is already being attempted in the background \u2014 check the Cloud status in the sidebar.`
+    : `Sign in (Account tab) so future saves back up automatically, or go to Account \u2192 Download full backup now, to be safe either way.`;
   el.innerHTML = `<div class="banner err" style="margin:0; box-shadow:var(--shadow-lg);"><span class="mono">!</span><span class="fill">
     <b>Changes are not being saved \u2014 browser storage is full.</b><br/>
     Your existing data is still intact (a failed save never deletes), but nothing new will persist until space is freed. Current workbook size: ${mb} MB.<br/>
-    Try: Performance tab \u2192 clear old view snapshots, or export a backup and re-import.
+    Try: Performance tab \u2192 clear old view snapshots. ${cloudLine}
   </span><button onclick="document.getElementById('storageWarnBanner').remove()">Dismiss</button></div>`;
   document.body.appendChild(el);
 }
@@ -1767,6 +1770,36 @@ async function handleImportFile(file){
   WB.meta.source = 'IMPORTED: ' + file.name;
   const ok = await persistWorkbook();
   return { ok, message: ok ? `Imported ${file.name}. This is now the source of truth for the session.` : 'Import failed — file not applied.' };
+}
+
+function downloadJSONFile(filename, obj){
+  const blob = new Blob([JSON.stringify(obj)], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+// The real "export a backup" — exportWorkbook() below only writes what fits
+// a spreadsheet (listings, completion, closeout), the same fields
+// handleImportFile() reads back. Keyword research, view/favorite history,
+// projects, restore points, push log, and Playbook edits never round-trip
+// through that pair. This is the whole WB object, so a restore from it is
+// indistinguishable from never having lost anything.
+function downloadFullBackup(){
+  downloadJSONFile(`Kismet_Full_Backup_${todayISO}.json`, WB);
+}
+async function handleFullBackupImport(file){
+  let data;
+  try{ data = JSON.parse(await file.text()); }
+  catch(e){ return { ok:false, message:'That file isn\'t valid JSON — could not read it as a backup.' }; }
+  if(!data || !Array.isArray(data.listings) || !data.meta){
+    return { ok:false, message:'That doesn\'t look like a Kismet full backup file.' };
+  }
+  WB = data;
+  const ok = await persistWorkbook();
+  return { ok, message: ok ? 'Full backup restored — every field, not just listings.' : 'Restored in memory, but saving locally failed.' };
 }
 
 function exportWorkbook(){
@@ -3335,6 +3368,9 @@ function renderProjects(){
 
   html += `<div class="section-note">A project is a batch of listings you're working on together, with a fixed scope — the only fields it's allowed to change on Etsy. Keeping the scope narrow means you can tell what actually worked.</div>`;
 
+  html += `<div class="section-note" style="margin-bottom:14px;">Editing many listings at once? <b>Download bulk edit</b> below for a spreadsheet of your current SKU / Title / Description / Tags — change what you want in Excel or Sheets, delete the rows you didn't touch, then <b>Load batch</b> (top bar) to bring it back in. Nothing writes to Etsy until you assign it to a project and push.</div>
+  <button class="btn" id="downloadBulkEditBtn" style="margin-bottom:14px;">Download bulk edit template</button>`;
+
   html += `<button class="btn primary" id="newProjectBtn">New project</button>`;
   html += `<div id="newProjectForm" style="display:${projectState.openNewProjectForm?'block':'none'}; margin-top:14px;">
     <div class="card" style="max-width:640px;">
@@ -3657,6 +3693,7 @@ function renderProjects(){
   if(assignCancelBtn) assignCancelBtn.addEventListener('click', ()=>{
     projectState.pendingAssign = null; renderProjects();
   });
+  document.getElementById('downloadBulkEditBtn').addEventListener('click', downloadBulkEditTemplate);
   document.getElementById('newProjectBtn').addEventListener('click', ()=>{
     const willOpen = form.style.display==='none';
     form.style.display = willOpen ? 'block' : 'none';
@@ -5503,16 +5540,34 @@ ${r.failList.join('\n')}`;
 function triggerImport(){ document.getElementById('importFileInput').click(); }
 function triggerBatchImport(){ document.getElementById('batchFileInput').click(); }
 
-// Loads a prepared batch (JSON) of drafted listings into matching SKUs.
-// Fills proposedTitle/description/tags only — never touches status, live
-// date, or anything already recorded. Verification flags from the batch
-// are carried in as blockers so they can't be pushed without being seen.
+// Loads a prepared batch of drafted listings into matching SKUs. Accepts
+// either the original JSON shape or a spreadsheet (.xlsx/.csv) with
+// SKU/Title/Description/Tags columns — same "download a starter, edit it,
+// re-upload" workflow as the bulk edit template button offers. Fills
+// proposedTitle/description/tags only — never touches status, live date, or
+// anything already recorded. Verification flags from the batch are carried
+// in as blockers so they can't be pushed without being seen.
 async function handleBatchImport(file){
+  const isSpreadsheet = /\.(xlsx|xls|csv)$/i.test(file.name||'');
   let rows;
-  try{
-    rows = JSON.parse(await file.text());
-    if(!Array.isArray(rows)) throw new Error('not a list');
-  }catch(e){ return { ok:false, message:'That file isn\'t a valid batch file.' }; }
+  if(isSpreadsheet){
+    try{
+      const buf = await file.arrayBuffer();
+      const wbx = XLSX.read(buf, { type:'array' });
+      const sheetRows = XLSX.utils.sheet_to_json(wbx.Sheets[wbx.SheetNames[0]], { defval:'' });
+      rows = sheetRows.map(r=>({
+        sku: String(r['SKU'] ?? r['Sku'] ?? r['sku'] ?? '').trim(),
+        proposedTitle: String(r['Title'] ?? r['Proposed Title'] ?? '').trim(),
+        description: String(r['Description'] ?? '').trim(),
+        tags: String(r['Tags'] ?? '').split(',').map(t=>t.trim()).filter(Boolean),
+      })).filter(r=>r.sku);
+    }catch(e){ return { ok:false, message:'Could not read that spreadsheet: ' + e.message }; }
+  } else {
+    try{
+      rows = JSON.parse(await file.text());
+      if(!Array.isArray(rows)) throw new Error('not a list');
+    }catch(e){ return { ok:false, message:'That file isn\'t a valid batch file.' }; }
+  }
 
   const sampleRows = rows.filter(r=>String(r.sku||'').startsWith(RESERVED_SAMPLE_PREFIX));
   if(sampleRows.length){
@@ -5527,6 +5582,7 @@ async function handleBatchImport(file){
   const matchedSkus = [];
   rows.forEach(r=>{
     const sku = String(r.sku||'').padStart(4,'0');
+    if(!r.sku) return;
     const l = bySku[sku];
     if(!l){ missing.push(sku); return; }
     if(r.proposedTitle) l.proposedTitle = r.proposedTitle;
@@ -5545,7 +5601,7 @@ async function handleBatchImport(file){
   // exactly the problem. The caller shows an assignment step next: pick
   // an existing project, or create a new one with the right scope.
   if(ok && matched){
-    projectState.pendingAssign = { skus: matchedSkus, sourceLabel: file.name.replace(/\.json$/i,'') };
+    projectState.pendingAssign = { skus: matchedSkus, sourceLabel: file.name.replace(/\.(json|xlsx|xls|csv)$/i,'') };
   }
   return {
     ok,
@@ -5554,6 +5610,20 @@ async function handleBatchImport(file){
       ? `Loaded ${matched} of ${rows.length} listings.${missing.length?` ${missing.length} SKU(s) weren't found in this shop: ${missing.slice(0,8).join(', ')}${missing.length>8?'…':''}.`:''}${flagged?` ${flagged} carry verification flags — shown as a warning when you push, not a requirement.`:''} Next: choose which project to add them to.`
       : 'Parsed the file but saving failed. Try again.',
   };
+}
+
+// Starter file for bulk editing: your real listings if you have any (so
+// there's nothing to look up — just edit what you want changed and delete
+// the rest of the rows), otherwise one clearly-fake example row using the
+// same DEMO- prefix the import step refuses to accept as real data.
+function downloadBulkEditTemplate(){
+  const live = WB.listings.filter(l=>!l.isDraft);
+  const rows = live.length
+    ? live.map(l=>({ SKU:l.sku, Title:l.proposedTitle||l.oldTitle||'', Description:l.description||'', Tags:(l.tags||[]).join(', ') }))
+    : [{ SKU:RESERVED_SAMPLE_PREFIX+'0001', Title:'Example Listing Title', Description:'Example description.', Tags:'example tag, another tag' }];
+  const wbx = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wbx, XLSX.utils.json_to_sheet(rows), 'Bulk Edit');
+  XLSX.writeFile(wbx, `Kismet_Bulk_Edit_${todayISO}.xlsx`);
 }
 
 
@@ -6542,6 +6612,15 @@ async function renderAccount(){
     }
   }
 
+  html += `<div class="section-title" style="margin-top:30px;"><span class="left">Full backup file — "${escapeHtml(currentProfile().label)}"</span></div>
+  <div class="section-note">A complete .json snapshot of this shop — not just listings, but keyword research, view/favorite history, projects, restore points, push log, and Playbook edits. This is the real "export a backup" the storage-full warning points to; the Export workbook button (top bar) only covers what fits a spreadsheet. Works with or without being signed in.</div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    <button class="btn" id="downloadFullBackupBtn">Download full backup (.json)</button>
+    <button class="btn" id="restoreFullBackupBtn">Restore from backup file</button>
+  </div>
+  <input type="file" id="fullBackupFileInput" accept=".json" style="display:none"/>
+  <div class="result-flash" id="fullBackupFlash"></div>`;
+
   document.getElementById('content').innerHTML = html;
 
   const flash = (ok,msg)=>{
@@ -6588,6 +6667,19 @@ async function renderAccount(){
     await pullFromCloud(pid);
     render();
   }));
+  document.getElementById('downloadFullBackupBtn').addEventListener('click', downloadFullBackup);
+  const restoreBtn = document.getElementById('restoreFullBackupBtn');
+  const restoreInput = document.getElementById('fullBackupFileInput');
+  restoreBtn.addEventListener('click', ()=> restoreInput.click());
+  restoreInput.addEventListener('change', async (e)=>{
+    const file = e.target.files[0]; e.target.value = '';
+    if(!file) return;
+    if(!confirm(`Restore "${currentProfile().label}" from this backup file? This replaces everything currently in this shop on this browser — listings, projects, keyword research, history, all of it. This can't be undone.`)) return;
+    const r = await handleFullBackupImport(file);
+    const flashEl = document.getElementById('fullBackupFlash');
+    if(flashEl){ flashEl.className = 'result-flash show ' + (r.ok?'ok':'err'); flashEl.textContent = r.message; }
+    if(r.ok) render();
+  });
 }
 
 
