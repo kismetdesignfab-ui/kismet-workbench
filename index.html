@@ -1342,6 +1342,104 @@ function escapeHtml(s){
 function findListing(sku){ return WB.listings.find(l=>l.sku===sku); }
 
 // ============================================================
+// TREND CHARTS — one small inline-SVG line chart, reused by the listing
+// drawer (views/favorites) and the Dashboard (visits/orders/revenue).
+// Single series per chart, so no legend box — the section title already
+// names what's plotted. Steel is the app's informational color (never
+// torch — torch stays reserved for actions), text stays in ink, never
+// the series color. Every value shown here also lives in a table
+// alongside it; the chart is a second way to see the same numbers, never
+// the only way to get them.
+// trendChartHtml() returns the markup to drop into a template string;
+// call mountTrendChart() with the same args right after that markup is
+// actually in the DOM (same two-step pattern the rest of the app uses
+// for anything that needs live measurements or event listeners).
+// ============================================================
+function trendChartHtml(id, points, opts){
+  const height = (opts && opts.height) || 92;
+  const clean = (points||[]).filter(p=>p.y!=null);
+  if(clean.length < 2){
+    return `<div class="section-note" style="margin:4px 0 0 0;">${clean.length===1 ? 'One data point so far — a trend needs at least two.' : 'No data yet.'}</div>`;
+  }
+  return `<div class="trend-chart" id="${id}" style="position:relative; margin:4px 0 2px 0;"></div>`;
+}
+function mountTrendChart(id, points, opts){
+  const el = document.getElementById(id);
+  if(!el) return;
+  opts = opts || {};
+  const height = opts.height || 92;
+  const color = opts.color || 'var(--steel)';
+  const fillColor = opts.fill || 'var(--steel-soft)';
+  const fmt = opts.valueFormat || (v=>String(Math.round(v)));
+  const clean = (points||[]).filter(p=>p.y!=null);
+  if(clean.length < 2) return;
+
+  const width = Math.max(el.clientWidth || 480, 200);
+  const padTop = 18, padBottom = 18, padX = 6;
+  const plotH = height - padTop - padBottom;
+  const baseline = padTop + plotH;
+  const ys = clean.map(p=>p.y);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const spanY = (maxY - minY) || (Math.abs(maxY) * 0.1) || 1;
+  const stepX = (width - padX*2) / (clean.length-1);
+  const xAt = i => padX + i*stepX;
+  const yAt = v => baseline - ((v - minY) / spanY) * plotH;
+
+  const linePath = clean.map((p,i)=> (i===0?'M':'L') + xAt(i).toFixed(1) + ',' + yAt(p.y).toFixed(1)).join(' ');
+  const areaPath = `M${xAt(0).toFixed(1)},${baseline.toFixed(1)} ${clean.map((p,i)=>'L'+xAt(i).toFixed(1)+','+yAt(p.y).toFixed(1)).join(' ')} L${xAt(clean.length-1).toFixed(1)},${baseline.toFixed(1)} Z`;
+  const lastX = xAt(clean.length-1), lastY = yAt(clean[clean.length-1].y);
+  const labelLeft = lastX > width - 46; // flip the end-label left if it would clip the right edge
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" style="display:block; overflow:visible;">
+      <line x1="${xAt(0).toFixed(1)}" y1="${baseline.toFixed(1)}" x2="${xAt(clean.length-1).toFixed(1)}" y2="${baseline.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+      <path d="${areaPath}" fill="${fillColor}" stroke="none"/>
+      <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <line class="tc-crosshair" x1="0" y1="${padTop}" x2="0" y2="${baseline}" stroke="var(--smoke)" stroke-width="1" opacity="0"></line>
+      <circle class="tc-hoverdot" r="5" fill="${color}" stroke="var(--panel)" stroke-width="2" opacity="0"></circle>
+      <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="${color}" stroke="var(--panel)" stroke-width="2"></circle>
+      <text x="${(labelLeft ? lastX-8 : lastX+8).toFixed(1)}" y="${Math.max(10,lastY-8).toFixed(1)}" text-anchor="${labelLeft?'end':'start'}" font-family="'IBM Plex Mono',monospace" font-size="11" font-weight="600" fill="var(--ink)">${escapeHtml(fmt(clean[clean.length-1].y))}</text>
+      <rect class="tc-hitlayer" x="0" y="0" width="${width}" height="${height}" fill="transparent"></rect>
+    </svg>
+    <div class="tc-tooltip" style="position:absolute; pointer-events:none; opacity:0; background:var(--ink); color:#fff; font-size:11px; font-family:'IBM Plex Mono',monospace; padding:4px 8px; border-radius:6px; white-space:nowrap; transform:translate(-50%,-100%); top:0; left:0; z-index:5; transition:opacity .1s;"></div>
+  `;
+
+  const svg = el.querySelector('svg');
+  const hit = el.querySelector('.tc-hitlayer');
+  const crosshair = el.querySelector('.tc-crosshair');
+  const hoverDot = el.querySelector('.tc-hoverdot');
+  const tooltip = el.querySelector('.tc-tooltip');
+
+  function nearestIndex(clientX){
+    const rect = svg.getBoundingClientRect();
+    const svgX = (clientX - rect.left) / rect.width * width;
+    return Math.max(0, Math.min(clean.length-1, Math.round((svgX - padX) / stepX)));
+  }
+  function showAt(clientX){
+    const i = nearestIndex(clientX);
+    const p = clean[i];
+    const x = xAt(i), y = yAt(p.y);
+    crosshair.setAttribute('x1', x.toFixed(1)); crosshair.setAttribute('x2', x.toFixed(1));
+    crosshair.setAttribute('opacity', '1');
+    hoverDot.setAttribute('cx', x.toFixed(1)); hoverDot.setAttribute('cy', y.toFixed(1));
+    hoverDot.setAttribute('opacity', '1');
+    const svgRect = svg.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    tooltip.style.left = (svgRect.left + (x/width)*svgRect.width - elRect.left) + 'px';
+    tooltip.style.top = (svgRect.top + (y/height)*svgRect.height - elRect.top - 8) + 'px';
+    tooltip.style.opacity = '1';
+    tooltip.textContent = `${p.x} · ${fmt(p.y)}`; // p.x is our own ISO date / label, but textContent keeps this safe regardless
+  }
+  function hide(){
+    crosshair.setAttribute('opacity','0');
+    hoverDot.setAttribute('opacity','0');
+    tooltip.style.opacity = '0';
+  }
+  hit.addEventListener('pointermove', e=> showAt(e.clientX));
+  hit.addEventListener('pointerleave', hide);
+}
+
+// ============================================================
 // NAV
 // ============================================================
 // ============================================================
@@ -1914,26 +2012,10 @@ function shopWideViewTrend(){
   });
   return Object.entries(byDate).map(([date,total])=>({date,total})).sort((a,b)=>a.date.localeCompare(b.date));
 }
-// Small, dependency-free inline line chart — no charting library is loaded
-// in this app, so this hand-builds the SVG path directly from the points.
-function sparklineSvg(points, w, h){
-  if(points.length<2) return '';
-  const vals = points.map(p=>p.total);
-  const min = Math.min(...vals), max = Math.max(...vals);
-  const range = (max-min) || 1;
-  const stepX = w / (points.length-1);
-  const coords = points.map((p,i)=>{
-    const x = i*stepX;
-    const y = h - ((p.total-min)/range)*h*0.85 - h*0.075; // 7.5% padding top/bottom
-    return [x,y];
-  });
-  const path = coords.map((c,i)=>(i===0?'M':'L')+c[0].toFixed(1)+','+c[1].toFixed(1)).join(' ');
-  const areaPath = path + ` L${w},${h} L0,${h} Z`;
-  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none" style="display:block;">
-    <path d="${areaPath}" fill="var(--torch-soft)" stroke="none"/>
-    <path d="${path}" fill="none" stroke="var(--torch)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-  </svg>`;
-}
+// Charting is handled by trendChartHtml()/mountTrendChart() (defined below,
+// near findListing) — one shared hover-enabled line chart used here and in
+// the listing drawer, replacing what used to be a bare, non-interactive
+// per-page sparkline.
 
 // A single overall score: what share of listings are clean across every
 // enabled check. Deliberately simple and explainable — a listing counts
@@ -2200,7 +2282,7 @@ function renderDashboard(){
         <div class="k">LAST ${trend.length} TRACKED DAYS</div>
         <div style="font-size:13px; font-weight:700; color:${delta>=0?'var(--green)':'var(--red)'};">${delta>=0?'+':''}${delta} since first tracked day</div>
       </div>
-      ${sparklineSvg(trend, 700, 70)}
+      ${trendChartHtml('dashShopViewsChart', trend.map(p=>({x:p.date, y:p.total})), {height:84})}
     </div>`;
   }
 
@@ -2209,9 +2291,11 @@ function renderDashboard(){
   const trackedSkus = Array.from(new Set((WB.viewSnapshots||[]).map(v=>v.sku)))
     .map(s=>WB.listings.find(l=>l.sku===s)).filter(Boolean)
     .sort((a,b)=>a.sku.localeCompare(b.sku));
+  let dashTrackHist = null;
   if(trackedSkus.length){
     const sel = dashTrackedSku && trackedSkus.some(l=>l.sku===dashTrackedSku) ? dashTrackedSku : trackedSkus[0].sku;
     const hist = viewHistoryFor(sel);
+    dashTrackHist = hist;
     const pushDates = new Set((WB.pushLog||[]).filter(p=>p.sku===sel).map(p=>p.pushedAt.slice(0,10)));
     html += `<div class="section-title" style="margin-top:34px;"><span class="left">Single listing tracking</span></div>
     <div class="card" style="margin-bottom:24px;">
@@ -2220,13 +2304,12 @@ function renderDashboard(){
           ${trackedSkus.map(l=>`<option value="${l.sku}" ${l.sku===sel?'selected':''}>${escapeHtml(l.sku)} \u2014 ${escapeHtml((l.oldTitle||'').slice(0,55))}</option>`).join('')}
         </select></div>
       ${hist.length>=2 ? (()=>{
-        const pts = hist.map(h=>({ date:h.date, total:h.views==null?0:h.views }));
         const d = (hist[hist.length-1].views||0) - (hist[0].views||0);
         return `<div style="display:flex; justify-content:space-between; align-items:baseline; margin:6px 0 8px 0;">
           <div class="k">${hist.length} TRACKED DAYS</div>
           <div style="font-size:13px; font-weight:700; color:${d>=0?'var(--green)':'var(--red)'};">${d>=0?'+':''}${d} views since first tracked day</div>
         </div>
-        ${sparklineSvg(pts, 700, 60)}`;
+        ${trendChartHtml('dashListingViewsChart', hist.map(h=>({x:h.date, y:h.views})), {height:70})}`;
       })() : `<div class="section-note">Only ${hist.length} snapshot so far \u2014 a trend needs at least two days.</div>`}
       <div class="card-scroll" style="max-height:220px; margin-top:12px;"><table class="simple-table">
         <thead><tr><th>Date</th><th>Views</th><th>+</th><th>Favorites</th><th>+</th></tr></thead>
@@ -2248,6 +2331,8 @@ function renderDashboard(){
   }
 
   document.getElementById('content').innerHTML = html;
+  mountTrendChart('dashShopViewsChart', trend.map(p=>({x:p.date, y:p.total})), { height:84, valueFormat: v=>Math.round(v).toLocaleString() });
+  if(dashTrackHist) mountTrendChart('dashListingViewsChart', dashTrackHist.map(h=>({x:h.date, y:h.views})), { height:70, valueFormat: v=>Math.round(v).toLocaleString() });
   document.querySelectorAll('.priority-row').forEach(el=> el.addEventListener('click', ()=> openDrawer(el.dataset.sku)));
   const trackSel = document.getElementById('dashTrackSelect');
   if(trackSel) trackSel.addEventListener('change', (e)=>{ dashTrackedSku = e.target.value; renderDashboard(); });
@@ -2779,6 +2864,10 @@ function renderDrawer(l){
       <div class="section-note">${hist.length===1
         ? 'One snapshot so far — day-over-day numbers appear once there are at least two.'
         : `Last ${Math.min(hist.length,14)} snapshots. The + column is that day's real change.`}</div>
+      <div class="grid grid-2" style="gap:16px; margin-bottom:14px;">
+        <div class="card" style="padding:12px 14px;"><div class="k">Views</div>${trendChartHtml('drawerViewsChart_'+l.sku, hist.map(h=>({x:h.date, y:h.views})))}</div>
+        <div class="card" style="padding:12px 14px;"><div class="k">Favorites</div>${trendChartHtml('drawerFavChart_'+l.sku, hist.map(h=>({x:h.date, y:h.favorites})))}</div>
+      </div>
       <div class="card-scroll" style="max-height:260px;"><table class="simple-table">
         <thead><tr><th>Date</th><th>Views</th><th>+</th><th>Favorites</th><th>+</th></tr></thead>
         <tbody>${rows.map(r=>`<tr${r.pushed?' style="background:var(--torch-soft);"':''}>
@@ -2807,6 +2896,9 @@ function renderDrawer(l){
 
   renderTagsEditor(l);
   renderGateList(l);
+  const drawerHist = viewHistoryFor(l.sku);
+  mountTrendChart('drawerViewsChart_'+l.sku, drawerHist.map(h=>({x:h.date, y:h.views})), { valueFormat: v=>Math.round(v).toLocaleString() });
+  mountTrendChart('drawerFavChart_'+l.sku, drawerHist.map(h=>({x:h.date, y:h.favorites})), { valueFormat: v=>Math.round(v).toLocaleString() });
 
   document.getElementById('closeDrawer').addEventListener('click', ()=> closeDrawerChecked(l));
   // Track which listing the drawer is showing, so clicking the backdrop
