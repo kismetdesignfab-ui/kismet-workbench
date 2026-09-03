@@ -1280,6 +1280,23 @@ async function loadState(){
     if(!l.verifiedFacts) l.verifiedFacts = { formats:[], dimensions:'', kerf:'', personalization:'', materials:'', productionTime:'' };
   });
   if(WB.meta.pushPassword === undefined) WB.meta.pushPassword = '';
+  // One-time cleanup: titles/descriptions/tags pulled from Etsy before the
+  // decodeHtmlEntities() fix are stuck with literal entity text ("Mother&#39;s
+  // Day"). New imports come in clean already; this fixes what's already
+  // stored, once, then never runs again.
+  if(!WB.meta.htmlEntitiesDecoded_v1){
+    WB.listings.forEach(l=>{
+      l.oldTitle = decodeHtmlEntities(l.oldTitle);
+      l.oldDescription = decodeHtmlEntities(l.oldDescription);
+      if(Array.isArray(l.tags)) l.tags = l.tags.map(t=>decodeHtmlEntities(t));
+    });
+    if(WB.shopProfile){
+      WB.shopProfile.shopName = decodeHtmlEntities(WB.shopProfile.shopName);
+      WB.shopProfile.title = decodeHtmlEntities(WB.shopProfile.title);
+    }
+    if(Array.isArray(WB.shopSections)) WB.shopSections.forEach(s=>{ s.title = decodeHtmlEntities(s.title); });
+    WB.meta.htmlEntitiesDecoded_v1 = true;
+  }
   try{
     const r2 = await appStorage.get(UI_KEY);
     if(r2 && r2.value) uiState = JSON.parse(r2.value);
@@ -1338,6 +1355,22 @@ async function saveUiState(){
 function escapeHtml(s){
   if(s===null||s===undefined) return '';
   return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// Etsy's API returns some text fields (titles especially) with apostrophes
+// and other punctuation already HTML-entity-encoded — e.g. "Mother&#39;s
+// Day" instead of "Mother's Day". Left as-is, escapeHtml() above then
+// re-escapes that entity's own "&", producing "Mother&amp;#39;s Day" in the
+// page source, which the browser shows literally as "Mother&#39;s Day" —
+// the "apostrophes look weird" bug. Decoding once at the point text comes
+// in from Etsy (before it's ever stored or escaped) fixes it at the root
+// instead of patching every display site. Uses a <textarea>, not innerHTML
+// on a normal element — a textarea's content is parsed as text, never as
+// markup, so this can't execute anything even if the input contained tags.
+function decodeHtmlEntities(s){
+  if(s===null||s===undefined||s==='') return s;
+  const ta = document.createElement('textarea');
+  ta.innerHTML = String(s);
+  return ta.value;
 }
 function findListing(sku){ return WB.listings.find(l=>l.sku===sku); }
 
@@ -6088,8 +6121,8 @@ async function pushListingToEtsy(l, project){
     }
     const data = await res.json();
     // Trust Etsy's response over our own assumption of what happened.
-    if(data.title) l.oldTitle = data.title;
-    if(data.tags) l.tags = data.tags;
+    if(data.title) l.oldTitle = decodeHtmlEntities(data.title);
+    if(data.tags) l.tags = data.tags.map(t=>decodeHtmlEntities(t));
     if(data.shop_section_id !== undefined) l.shopSectionId = data.shop_section_id;
     l.etsyLastModified = data.last_modified_timestamp || l.etsyLastModified;
     l.liveDate = todayISO;
@@ -6132,8 +6165,8 @@ async function restoreListing(l, snap){
       return { ok:false, message:`Etsy rejected the restore (HTTP ${res.status}): ${t.slice(0,300)}` };
     }
     const data = await res.json();
-    if(data.title) l.oldTitle = data.title;
-    if(data.tags) l.tags = data.tags;
+    if(data.title) l.oldTitle = decodeHtmlEntities(data.title);
+    if(data.tags) l.tags = data.tags.map(t=>decodeHtmlEntities(t));
     l.etsyLastModified = data.last_modified_timestamp || l.etsyLastModified;
     await persistWorkbook();
     return { ok:true, message:`Restored to the version saved on ${snap.takenAt.slice(0,10)}.` };
@@ -6155,8 +6188,8 @@ async function fetchShopProfile(silent){
     if(!res.ok) return { ok:false, message:`Etsy returned HTTP ${res.status}` };
     const d = await res.json();
     WB.shopProfile = {
-      shopName: d.shop_name || '',
-      title: d.title || '',
+      shopName: decodeHtmlEntities(d.shop_name || ''),
+      title: decodeHtmlEntities(d.title || ''),
       url: d.url || '',
       activeListings: d.listing_active_count ?? null,
       digitalListings: d.digital_listing_count ?? null,
@@ -6183,7 +6216,7 @@ async function fetchShopSections(){
       return { ok:false, message:`Etsy returned HTTP ${res.status}: ${t.slice(0,200)}` };
     }
     const data = await res.json();
-    WB.shopSections = (data.results||[]).map(s=>({ id:s.shop_section_id, title:s.title }));
+    WB.shopSections = (data.results||[]).map(s=>({ id:s.shop_section_id, title:decodeHtmlEntities(s.title) }));
     await persistWorkbook();
     return { ok:true, count: WB.shopSections.length };
   }catch(e){
@@ -6318,6 +6351,15 @@ async function importFromEtsy(silent){
       if(seenIds.has(item.listing_id)) return false;
       seenIds.add(item.listing_id);
       return true;
+    });
+
+    // Decode Etsy's HTML-entity-encoded text fields once, here, before any
+    // of the matching/comparison logic below ever sees them — see
+    // decodeHtmlEntities() for why.
+    all.forEach(item=>{
+      if(item.title) item.title = decodeHtmlEntities(item.title);
+      if(item.description) item.description = decodeHtmlEntities(item.description);
+      if(Array.isArray(item.tags)) item.tags = item.tags.map(t=>decodeHtmlEntities(t));
     });
 
     // A listing with variations can carry several SKUs, and the first slot
