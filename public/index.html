@@ -992,13 +992,18 @@ TARGET BUYER: Makers, CNC plasma and laser operators, fabricators, and sign shop
 
 Title construction: Lead with the strongest accurate subject or product phrase supported by Marketplace Insights. Follow with comma-separated descriptive qualifiers and one natural hard identifier showing the product is a digital cut file for CNC plasma and/or laser users. Select from \`DXF\`, \`SVG\`, \`cut file\`, \`CNC cutting file\`, \`plasma cutting file\`, or \`laser cut file\` according to relevance, research evidence, and the actual included formats — never force every identifier into every title.
 
+When artwork/photo verification is available (mainSubject, visibleElements), it is the authoritative source for identifying and ordering the subject phrase — it resolves ambiguity a bare guess from the legacy title can't, and overrides how the old title happened to word it.
+
 - SVG before DXF when both are included. Add another format only when actually provided.
 - ALL-CAPS limited to three tokens total, and abbreviations count toward that limit — SVG, DXF, PNG, JPG, CNC included. Validated in code, not just in the instructions.
 - Never repeat the same significant word three or more times within one title ("Ring Silver Ring Sterling Ring" — hurts readability, doesn't help ranking; Etsy already understands variations).
 - **Length:** 15 words or fewer as a scannability guardrail, 140 characters as Etsy's hard limit, **no minimum, never lengthen an accurate title just to hit a range.** A short, correct title is never a problem. (Note: current 2026 sources describe an 80–120 character range as where well-formed titles tend to naturally land — useful as a sanity check, not a target to engineer toward.)
 - Do not add Cricut, xTool, Glowforge, wood, wooden, metal, steel, acrylic, cryptid, folklore, hiking, camping, wildlife, farmhouse, rustic, memorial, gift, or decor unless genuinely accurate for that specific design.
+- Never let word order create an unintended second meaning. If a breed/subject word sits next to a word that forms a real, different search category on its own ("Boxer" + "Girl" reads as a female boxing athlete before it reads as "girl with a Boxer dog"), reorder so the actual subject is unambiguous on first read.
+- Skip a shape/format descriptor ("Circular", "Round", "Square") unless it's a genuine identifying detail this niche's buyers actually search for. True-but-generic invites the wrong click — someone searching a completely different category — not more reach.
+- Join CNC/plasma/laser identifiers with commas or straight juxtaposition ("CNC Plasma Laser"), never "and" — it's an extra word that says nothing a comma doesn't already say.
 
-TITLE FAILURE TEST: If the title sounds like a pile of search terms instead of the name of a product, rewrite it. If the first phrase could describe five unrelated designs, it's too vague.
+TITLE FAILURE TEST: If the title sounds like a pile of search terms instead of the name of a product, rewrite it. If the first phrase could describe five unrelated designs, it's too vague. If it could be misread as a different category entirely (a breed name colliding with an unrelated word), rewrite it.
 
 **On duplicates and catalog-level term reuse:**
 - Exact duplicate titles should be avoided when the products are materially different.
@@ -2566,6 +2571,12 @@ function renderArtworkDescription(d){
   const dims = d.dimensionsShownInPhoto||'';
   const specs = d.otherSpecsShownInPhoto||'';
   const hasSpecs = fmts.length || dims || specs;
+  // Once these have been applied to Verified facts, this exact reason to
+  // ask again is gone — asking every time you reopen the listing was just
+  // noise. A fresh photo re-check (a new `d`) naturally gets its own
+  // unflagged chance, since specsApplied lives on that description object,
+  // not on the listing.
+  const showApplyPrompt = hasSpecs && !d.specsApplied;
   return `<div class="banner ${cls}" style="margin:0;"><span class="mono">${conf==='high'?'✓':'!'}</span><span class="fill">
     <b>Seen in the photo:</b> ${escapeHtml(d.mainSubject||'(unclear)')}${d.confidence?` <span class="section-note" style="display:inline;">(confidence: ${escapeHtml(d.confidence)})</span>`:''}
     ${(d.visibleElements||[]).length?`<br/><b>Elements:</b> ${d.visibleElements.map(escapeHtml).join(', ')}`:''}
@@ -2573,13 +2584,13 @@ function renderArtworkDescription(d){
     ${d.styleNotes?`<br/><b>Style:</b> ${escapeHtml(d.styleNotes)}`:''}
     ${(d.notVisible||[]).length?`<br/><b>NOT established by this photo:</b> ${d.notVisible.map(escapeHtml).join(', ')}`:''}
   </span></div>
-  ${hasSpecs ? `<div class="banner warn" style="margin:8px 0 0 0;"><span class="mono">i</span><span class="fill">
+  ${showApplyPrompt ? `<div class="banner warn" style="margin:8px 0 0 0;"><span class="mono">i</span><span class="fill">
     <b>Specs printed on the photo</b> \u2014 a photo saying so isn't proof the file package actually contains it, so confirm before trusting:
     ${fmts.length?`<br/><b>Formats shown:</b> ${fmts.map(escapeHtml).join(', ')}`:''}
     ${dims?`<br/><b>Size shown:</b> ${escapeHtml(dims)}`:''}
     ${specs?`<br/><b>Other:</b> ${escapeHtml(specs)}`:''}
     <br/><button class="copy-btn" id="applyPhotoSpecsBtn" style="margin-top:6px;">Apply these to verified facts</button>
-  </span></div>` : ''}`;
+  </span></div>` : (hasSpecs ? `<div class="section-note" style="margin:6px 0 0 0;">Specs from this photo are already saved to Verified facts.</div>` : '')}`;
 }
 
 function rowLink(l, muted){
@@ -2860,7 +2871,7 @@ function renderDrawer(l){
           ${l.imageUrls.slice(0,5).map((u,i)=>`<img src="${escapeHtml(u)}" alt="listing photo ${i+1}" style="width:88px; height:88px; object-fit:cover; border-radius:var(--r-md); border:1px solid var(--line);"/>`).join('')}
         </div>
         <div class="section-note" style="margin:0 0 8px 0;">The drafting AI can't see these. Checking the photo gives it a factual description of what's actually in the artwork instead of guessing from the old title.</div>
-        <button class="copy-btn" id="checkPhotoBtn">\u2726 Check photo &amp; describe artwork</button>
+        <button class="copy-btn" id="checkPhotoBtn">${l.artworkDescription ? '\u2726 Reread photo' : '\u2726 Check photo &amp; describe artwork'}</button>
         <div id="photoCheckResult" style="margin-top:8px;">${l.artworkDescription ? renderArtworkDescription(l.artworkDescription) : ''}</div>
       ` : `<div class="section-note" style="margin:0;">No photos pulled yet \u2014 run an Etsy import to fetch them.</div>`}
     </div>
@@ -3166,7 +3177,7 @@ function renderDrawer(l){
       const fresh = document.getElementById('photoCheckResult') || out;
       if(fresh) fresh.innerHTML = `<div class="banner err" style="margin:0;"><span class="mono">⚠</span><span class="fill">Couldn't check the photo: ${escapeHtml(e.message)}</span></div>`;
       const b = document.getElementById('checkPhotoBtn');
-      if(b){ b.disabled=false; b.textContent='\u2726 Check photo & describe artwork'; }
+      if(b){ b.disabled=false; b.textContent = l.artworkDescription ? '\u2726 Reread photo' : '\u2726 Check photo & describe artwork'; }
     }
   });
   const applySpecsBtn = document.getElementById('applyPhotoSpecsBtn');
@@ -3190,6 +3201,10 @@ function renderDrawer(l){
     if((d.dimensionsShownInPhoto||'').trim() && !(l.verifiedFacts.dimensions||'').trim()){
       l.verifiedFacts.dimensions = d.dimensionsShownInPhoto.trim();
     }
+    // Lives on this description object, not the listing — a fresh photo
+    // re-check returns a brand new object and earns its own unflagged
+    // chance to prompt again, same as any first-time check.
+    d.specsApplied = true;
     const saved = await persistWorkbook();
     renderDrawer(l);   // re-renders Verified facts with the new values, re-wired
     // Append the confirmation rather than replacing the block — replacing it
