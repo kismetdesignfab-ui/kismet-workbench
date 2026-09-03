@@ -1,0 +1,6 @@
+name = "soft-hall-7798"
+compatibility_date = "2026-09-02"
+account_id = "2dc350352d8934abd1ee3fa096cf967c"
+
+[assets]
+directory = "public"
