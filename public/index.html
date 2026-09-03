@@ -4910,12 +4910,167 @@ function upsertKeywordResearch(entry){
   return 'unchanged';
 }
 
+// ============================================================
+// TAG DATABASE — a catalog-wide, frequency-ranked view of every term
+// this shop has real evidence for: currently used as a live tag,
+// researched (WB.keywordResearch), and/or confirmed present in a
+// listing's own photo by the "Check photo & describe artwork" AI check.
+// Computed fresh from those existing collections every time it's
+// opened — nothing new to keep in sync, nothing that can go stale.
+// Reference only for now: browsing this doesn't write to any listing
+// or change what AI generation produces. That's a deliberate second
+// step, once it's clear this is actually surfacing the right terms.
+// ============================================================
+function buildTagDatabase(){
+  const live = WB.listings.filter(l=>!l.isDraft);
+  const terms = new Map(); // normalized keyword -> record
+
+  function getRecord(rawTerm){
+    const norm = normalizeKeyword(rawTerm);
+    if(!norm) return null;
+    let rec = terms.get(norm);
+    if(!rec){
+      rec = { term: String(rawTerm).trim(), normalized: norm, usedCount:0, usedSkus:[], photoCount:0, photoSkus:[], research:null };
+      terms.set(norm, rec);
+    }
+    return rec;
+  }
+
+  // 1) Terms actually in use right now — the strongest signal there is:
+  // proven enough to already be live on a real listing.
+  live.forEach(l=>{
+    (l.tags||[]).forEach(t=>{
+      const rec = getRecord(t);
+      if(!rec) return;
+      rec.usedCount++;
+      rec.usedSkus.push(l.sku);
+    });
+  });
+
+  // 2) Terms confirmed present in a listing's own photo — the AI's
+  // factual read of what the art actually shows (mainSubject and
+  // visibleElements only; notVisible is explicitly what ISN'T there,
+  // never harvested as a candidate term).
+  live.forEach(l=>{
+    const d = l.artworkDescription;
+    if(!d) return;
+    const candidates = [d.mainSubject, ...(d.visibleElements||[])].filter(Boolean);
+    candidates.forEach(c=>{
+      const rec = getRecord(c);
+      if(!rec) return;
+      rec.photoCount++;
+      rec.photoSkus.push(l.sku);
+    });
+  });
+
+  // 3) Layer in research (search volume, trend, conversion) wherever it
+  // exists, using the exact normalization the Keyword Research tab
+  // already keys on — so these numbers always agree with that tab,
+  // never a re-derived guess. A term researched but never actually
+  // used anywhere is still worth surfacing here: that's precisely the
+  // "proven but sitting unused" gap this view exists to find.
+  (WB.keywordResearch||[]).forEach(k=>{
+    const rec = getRecord(k.keyword);
+    if(!rec) return;
+    if(!rec.research || (k.dateResearched||'') >= (rec.research.dateResearched||'')) rec.research = k;
+  });
+
+  return Array.from(terms.values());
+}
+function renderKeywordsViewToggle(){
+  const view = kwState.view || 'log';
+  return `<div style="display:flex; gap:8px; margin-bottom:16px;">
+    <button class="btn ${view==='log'?'primary':''}" data-kwview="log">Research log</button>
+    <button class="btn ${view==='database'?'primary':''}" data-kwview="database">Tag database</button>
+  </div>`;
+}
+function wireKeywordsViewToggle(){
+  document.querySelectorAll('[data-kwview]').forEach(b=> b.addEventListener('click', ()=>{
+    kwState.view = b.dataset.kwview;
+    renderKeywords();
+  }));
+}
+function renderTagDatabaseView(){
+  const rows = buildTagDatabase();
+  const search = (kwState.tagDbSearch||'').toLowerCase();
+  let filtered = search ? rows.filter(r=>r.term.toLowerCase().includes(search)) : rows;
+
+  const filterKind = kwState.tagDbFilter || 'all';
+  const isUnusedResearched = r=> r.usedCount===0 && !!r.research;
+  const isPhotoOnly = r=> r.usedCount===0 && !r.research && r.photoCount>0;
+  if(filterKind==='used') filtered = filtered.filter(r=>r.usedCount>0);
+  else if(filterKind==='unused-researched') filtered = filtered.filter(isUnusedResearched);
+  else if(filterKind==='photo-only') filtered = filtered.filter(isPhotoOnly);
+
+  // Proven-and-used first (by how widely it's already reused), then
+  // proven-by-research-but-unused ranked by search volume, alphabetical
+  // as the final tiebreak — surfaces exactly what "saturate the terms
+  // that work" needs: what's already working, then what's sitting on
+  // the table unused. (The filter chips above exist precisely because,
+  // at real scale, hundreds of already-used tags bury that second group
+  // behind a flat sort — this lets you jump straight to it.)
+  filtered.sort((a,b)=>{
+    if(b.usedCount !== a.usedCount) return b.usedCount - a.usedCount;
+    const as = parseInt(String((a.research&&a.research.searches)||'').replace(/[^0-9]/g,''),10) || 0;
+    const bs = parseInt(String((b.research&&b.research.searches)||'').replace(/[^0-9]/g,''),10) || 0;
+    if(bs !== as) return bs - as;
+    return a.term.localeCompare(b.term);
+  });
+
+  const usedTotal = rows.filter(r=>r.usedCount>0).length;
+  const researchedUnused = rows.filter(isUnusedResearched).length;
+  const photoOnly = rows.filter(isPhotoOnly).length;
+  const chip = (kind, label, count)=> `<div class="card" data-tagdbfilter="${kind}" style="cursor:pointer; ${filterKind===kind?'border-color:var(--ink); border-width:1.5px;':''}"><div class="k">${label}</div><div class="v">${count}</div></div>`;
+
+  let html = renderKeywordsViewToggle();
+  html += `<div class="section-note">Every term this shop has real evidence for — currently used as a live tag, researched, and/or confirmed present in a listing's own photo. Tap a card to filter. Reference only for now: browsing this doesn't change any listing.</div>`;
+  html += `<div class="grid grid-4" style="margin-bottom:16px;">
+    ${chip('all','TOTAL TERMS', rows.length)}
+    ${chip('used','CURRENTLY IN USE', usedTotal)}
+    ${chip('unused-researched','RESEARCHED, UNUSED', researchedUnused)}
+    ${chip('photo-only','PHOTO-ONLY', photoOnly)}
+  </div>`;
+  html += `<div class="toolbar"><input class="search" id="tagDbSearchInput" placeholder="Search terms…" value="${escapeHtml(kwState.tagDbSearch||'')}"/></div>`;
+  html += `<div class="card-scroll" style="max-height:520px;"><table class="simple-table">
+    <thead><tr><th>Term</th><th>Evidence</th><th>Searches</th><th>Conversion</th><th>Source</th></tr></thead>
+    <tbody>${filtered.slice(0,1000).map(r=>{
+      const badges = [];
+      if(r.usedCount>0) badges.push(`<span class="badge updated" title="${escapeHtml(r.usedSkus.slice(0,20).join(', '))}">USED ×${r.usedCount}</span>`);
+      if(r.research) badges.push(`<span class="badge notreviewed">RESEARCHED</span>`);
+      if(r.photoCount>0) badges.push(`<span class="badge draft" title="${escapeHtml(r.photoSkus.slice(0,20).join(', '))}">IN PHOTO ×${r.photoCount}</span>`);
+      return `<tr>
+        <td>${escapeHtml(r.term)}</td>
+        <td class="small">${badges.join(' ')}</td>
+        <td class="small">${r.research && r.research.searches!=null ? escapeHtml(String(r.research.searches)) : '—'}</td>
+        <td class="small">${r.research && r.research.conversion ? escapeHtml(r.research.conversion) : '—'}</td>
+        <td class="small">${r.research && r.research.source ? escapeHtml(r.research.source) : (r.photoCount>0 && !r.research ? 'photo' : '—')}</td>
+      </tr>`;
+    }).join('') || `<tr><td colspan="5" class="small">${rows.length ? 'No terms match.' : 'Nothing to show yet — use tags on listings, research keywords, or check a photo, then come back.'}</td></tr>`}</tbody>
+  </table></div>`;
+
+  document.getElementById('content').innerHTML = html;
+  wireKeywordsViewToggle();
+  document.querySelectorAll('[data-tagdbfilter]').forEach(el=> el.addEventListener('click', ()=>{
+    kwState.tagDbFilter = el.dataset.tagdbfilter;
+    renderTagDatabaseView();
+  }));
+  const searchEl = document.getElementById('tagDbSearchInput');
+  if(searchEl) searchEl.addEventListener('input', e=>{
+    kwState.tagDbSearch = e.target.value;
+    renderTagDatabaseView();
+    const el = document.getElementById('tagDbSearchInput');
+    if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  });
+}
+
 function renderKeywords(){
+  if((kwState.view||'log')==='database'){ renderTagDatabaseView(); return; }
   const queue = WB.keywordQueue;
   const log = WB.keywordResearch.slice().sort((a,b)=> (b.dateResearched||'').localeCompare(a.dateResearched||''));
   const filtered = kwState.search ? log.filter(k=>k.keyword.toLowerCase().includes(kwState.search.toLowerCase())) : log;
 
-  let html = `<div class="section-note">Etsy doesn't expose Marketplace Insights through the API, so import happens by screenshot \u2014 upload the page as you actually see it in Shop Manager, and it's read and logged automatically.</div>`;
+  let html = renderKeywordsViewToggle();
+  html += `<div class="section-note">Etsy doesn't expose Marketplace Insights through the API, so import happens by screenshot \u2014 upload the page as you actually see it in Shop Manager, and it's read and logged automatically.</div>`;
 
   html += `<div class="section-title"><span class="left">Import a compiled research file</span></div>`;
   html += `<div class="section-note">A JSON file with many rows at once. Nothing is written until you review the preview and click Apply.</div>`;
@@ -5029,6 +5184,7 @@ function renderKeywords(){
   </table></div>`;
 
   document.getElementById('content').innerHTML = html;
+  wireKeywordsViewToggle();
 
   document.getElementById('kwBatchPreviewBtn').addEventListener('click', async ()=>{
     const file = document.getElementById('kwBatchInput').files[0];
