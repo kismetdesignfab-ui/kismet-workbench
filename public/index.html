@@ -1375,7 +1375,6 @@ async function loadState(){
     if(l.oldTags===undefined) l.oldTags = (l.tags||[]).slice();
   });
   if(WB.meta.pushPassword === undefined) WB.meta.pushPassword = '';
-  if(WB.meta.gaMeasurementId === undefined) WB.meta.gaMeasurementId = '';
   // One-time cleanup: titles/descriptions/tags pulled from Etsy before the
   // decodeHtmlEntities() fix are stuck with literal entity text ("Mother&#39;s
   // Day"). New imports come in clean already; this fixes what's already
@@ -1469,42 +1468,6 @@ function decodeHtmlEntities(s){
   return ta.value;
 }
 function findListing(sku){ return WB.listings.find(l=>l.sku===sku); }
-
-// ============================================================
-// GOOGLE ANALYTICS — tracks usage of this app itself (which tabs get
-// opened, how often), not the Etsy shop. Etsy doesn't allow third-party
-// tracking scripts on shop/listing pages, so GA can't measure shop
-// traffic that way regardless — this is purely "how is the tool being
-// used." Opt-in: nothing loads until a Measurement ID is saved on the
-// Account tab. Single-page app, so page views don't happen for free on
-// tab changes the way they would on a normal multi-page site — fired
-// manually from render() instead, once per tab shown.
-// ============================================================
-let gaLoadedId = null;
-function loadGoogleAnalytics(id){
-  id = (id||'').trim();
-  if(!id || gaLoadedId === id) return;
-  gaLoadedId = id;
-  const s = document.createElement('script');
-  s.async = true;
-  s.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(id)}`;
-  document.head.appendChild(s);
-  // gtag() calls made before this script finishes loading are queued into
-  // dataLayer automatically — no need to wait for onload before calling
-  // config/event below or in trackPageView().
-  window.dataLayer = window.dataLayer || [];
-  window.gtag = window.gtag || function(){ window.dataLayer.push(arguments); };
-  gtag('js', new Date());
-  // send_page_view:false — the automatic view on `config` would only ever
-  // fire once, on load, and always report whatever the first tab was.
-  gtag('config', id, { send_page_view: false });
-}
-function trackPageView(tabId, tabLabel){
-  if(!gaLoadedId || typeof gtag!=='function') return;
-  gtag('event', 'page_view', {
-    page_title: tabLabel, page_path: '/'+tabId, page_location: location.href,
-  });
-}
 
 // ============================================================
 // TREND CHARTS — one small inline-SVG line chart, reused by the listing
@@ -1859,7 +1822,6 @@ function renderProfileSwitcher(){
   document.getElementById('profileSelect').addEventListener('change', async (e)=>{
     await setActiveProfile(e.target.value);
     await loadState(); await loadEtsyAuth();
-    loadGoogleAnalytics(WB.meta.gaMeasurementId);
     uiState.lastTab = 'dashboard'; await saveUiState();
     render();
     closeMobileMenu();
@@ -1870,7 +1832,6 @@ function renderProfileSwitcher(){
     const id = await createProfile(label.trim());
     await setActiveProfile(id);
     await loadState(); await loadEtsyAuth();
-    loadGoogleAnalytics(WB.meta.gaMeasurementId);
     uiState.lastTab = 'dashboard'; await saveUiState();
     render();
     closeMobileMenu();
@@ -1880,7 +1841,6 @@ function renderProfileSwitcher(){
     if(!confirm(`Delete the shop "${cp.label}" and everything saved under it? This cannot be undone.`)) return;
     await deleteProfile(cp.id);
     await loadState(); await loadEtsyAuth();
-    loadGoogleAnalytics(WB.meta.gaMeasurementId);
     uiState.lastTab = 'dashboard'; await saveUiState();
     render();
     closeMobileMenu();
@@ -5686,14 +5646,6 @@ function renderPlaybook(){
     <div class="save-bar"><button class="btn primary" id="savePushPasswordBtn">Save</button><span class="result-flash" id="pushPasswordFlash"></span></div>
   </div>
 
-  <div class="section-title"><span class="left">Google Analytics</span></div>
-  <div class="section-note">Tracks usage of this app itself — which tabs you open, how often — not your Etsy shop (Etsy doesn't allow third-party tracking scripts on shop pages). Leave blank to turn this off. Find your Measurement ID in Google Analytics under Admin → Data Streams → your web stream (looks like G-XXXXXXXXXX).</div>
-  <div class="card" style="max-width:440px; margin-bottom:24px;">
-    <div class="field" style="margin-bottom:0;"><label>Measurement ID</label>
-      <input type="text" id="gaMeasurementIdInput" value="${escapeHtml(WB.meta.gaMeasurementId||'')}" placeholder="e.g. G-XXXXXXXXXX"/></div>
-    <div class="save-bar"><button class="btn primary" id="saveGaBtn">Save</button><span class="result-flash" id="gaFlash"></span></div>
-  </div>
-
   <div class="section-title"><span class="left">Check types</span></div>
   <div class="section-note">Every warning in the app \u2014 batch verification checks, the SKU health check, anything else \u2014 belongs to a named type. Turn off any type you don't want to track: it stops counting, stops showing, everywhere, until you turn it back on.</div>
   <div class="card" style="max-width:640px; margin-bottom:24px;">
@@ -5970,14 +5922,6 @@ function renderPlaybook(){
     const f = document.getElementById('pushPasswordFlash');
     f.className = 'result-flash show ' + (ok?'ok':'err');
     f.textContent = ok ? 'Saved.' : 'Save failed — try again.';
-  });
-  document.getElementById('saveGaBtn').addEventListener('click', async ()=>{
-    WB.meta.gaMeasurementId = document.getElementById('gaMeasurementIdInput').value.trim();
-    const ok = await persistWorkbook();
-    const f = document.getElementById('gaFlash');
-    f.className = 'result-flash show ' + (ok?'ok':'err');
-    f.textContent = ok ? 'Saved.' : 'Save failed — try again.';
-    if(ok) loadGoogleAnalytics(WB.meta.gaMeasurementId);
   });
   document.querySelectorAll('[data-checktype]').forEach(cb=> cb.addEventListener('change', async ()=>{
     await setCheckTypeEnabled(cb.dataset.checktype, cb.checked);
@@ -7300,7 +7244,6 @@ function render(){
   const eyebrowEl = document.getElementById('pageEyebrow');
   eyebrowEl.textContent = tabMeta.tag ? ('TAB.'+tabMeta.tag) : (currentProfile()? currentProfile().label.toUpperCase() : '');
   document.getElementById('pageTitle').textContent = tabMeta.label;
-  trackPageView(uiState.lastTab, tabMeta.label);
   document.getElementById('main').scrollTop = 0;
   updateMiniGauge();
   if(uiState.lastTab==='setup') renderSetup();
@@ -7351,7 +7294,6 @@ document.getElementById('batchFileInput').addEventListener('change', async (e)=>
 (async function init(){
   await loadProfiles();
   await loadState();
-  loadGoogleAnalytics(WB.meta.gaMeasurementId);
   await loadEtsyAuth();
   await loadCurrentUser();
   if(currentUser) cloudShopsCache = await listCloudShops();
