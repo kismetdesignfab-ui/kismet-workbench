@@ -960,7 +960,7 @@ function seedWorkbook(){
     keywordQueue: [],    // { keyword, addedFrom (sku or 'manual'), addedDate } — candidates not yet looked up
     audit: SEED_AUDIT.slice(), // one-time historical snapshot from Kismet's original workbook — sample-only
     projects: [], snapshots: [], pushLog: [], skuIssues: { checkedAt:null, missing:[], dupes:[] }, viewSnapshots: [], shopSections: [],
-    fileAudits: [], priceHistory: [],
+    fileAudits: [], priceHistory: [], sales: [],
     aiRules: KISMET_AI_RULES,
   };
 }
@@ -1239,6 +1239,7 @@ function emptyWorkbook(){
     skuIssues: { checkedAt:null, missing:[], dupes:[] }, viewSnapshots: [], shopSections: [],
     fileAudits: [],   // { sku, listingId, listingTitle, files[], attachmentCount, classification, auditedAt, error } — File Audit, read-only
     priceHistory: [], // { sku, listingId, oldPrice, newPrice, requestedAt, verified, message } — Price Only write log
+    sales: [],        // parsed Etsy sale-email line items — see GMAIL SALES SYNC section
     aiRules: DEFAULT_AI_RULES,
   };
 }
@@ -1351,6 +1352,10 @@ async function loadState(){
   if(!Array.isArray(WB.pushLog)) WB.pushLog = [];
   if(!Array.isArray(WB.fileAudits)) WB.fileAudits = [];
   if(!Array.isArray(WB.priceHistory)) WB.priceHistory = [];
+  if(!Array.isArray(WB.sales)) WB.sales = [];
+  if(WB.meta.gmailSyncLastSuccessfulAt === undefined) WB.meta.gmailSyncLastSuccessfulAt = null;
+  if(WB.meta.gmailSyncLastAttemptAt === undefined) WB.meta.gmailSyncLastAttemptAt = null;
+  if(WB.meta.gmailSyncLastError === undefined) WB.meta.gmailSyncLastError = null;
   if(!WB.meta.dismissedAttention) WB.meta.dismissedAttention = {};
   if(WB.meta.targetBuyer === undefined) WB.meta.targetBuyer = '';
   if(WB.meta.notTargetBuyer === undefined) WB.meta.notTargetBuyer = '';
@@ -1827,7 +1832,7 @@ function renderProfileSwitcher(){
     </div>`;
   document.getElementById('profileSelect').addEventListener('change', async (e)=>{
     await setActiveProfile(e.target.value);
-    await loadState(); await loadEtsyAuth();
+    await loadState(); await loadEtsyAuth(); await loadGmailAuth();
     uiState.lastTab = 'dashboard'; await saveUiState();
     render();
     closeMobileMenu();
@@ -1837,7 +1842,7 @@ function renderProfileSwitcher(){
     if(!label || !label.trim()) return;
     const id = await createProfile(label.trim());
     await setActiveProfile(id);
-    await loadState(); await loadEtsyAuth();
+    await loadState(); await loadEtsyAuth(); await loadGmailAuth();
     uiState.lastTab = 'dashboard'; await saveUiState();
     render();
     closeMobileMenu();
@@ -1846,7 +1851,7 @@ function renderProfileSwitcher(){
     if(profiles.length<=1) return;
     if(!confirm(`Delete the shop "${cp.label}" and everything saved under it? This cannot be undone.`)) return;
     await deleteProfile(cp.id);
-    await loadState(); await loadEtsyAuth();
+    await loadState(); await loadEtsyAuth(); await loadGmailAuth();
     uiState.lastTab = 'dashboard'; await saveUiState();
     render();
     closeMobileMenu();
@@ -5469,6 +5474,425 @@ function renderAttention(){
 }
 
 // ============================================================
+// GMAIL SALES SYNC + PRICING EXPERIMENT
+// Read-only against Gmail: only ever calls messages.list / messages.get.
+// NEVER labels, archives, moves, marks read/unread, deletes, or sends
+// anything — there is no write call anywhere in this section.
+//
+// This is a SEPARATE Google OAuth client from Etsy's — Gmail cannot be
+// authorized through Etsy's credentials, and there is no way to grant
+// "read only Etsy's emails": Gmail's OAuth scopes are mailbox-wide, so the
+// scope below (gmail.readonly, the narrowest scope that can read a
+// message's subject/body) grants read access to the whole mailbox: what
+// keeps this app looking at only Etsy mail is the search QUERY it sends,
+// not the grant itself. Connecting requires, before any of this can
+// actually run:
+//   1. A Google Cloud project with the Gmail API enabled
+//   2. An OAuth 2.0 Client ID registered there (Web application type)
+//   3. That Client ID pasted into GMAIL_CLIENT_ID below
+//   4. A small relay Worker (same shape/purpose as kismet-etsy-proxy) to do
+//      the token exchange server-side — Google's token endpoint doesn't
+//      support CORS from a browser origin, same reason Etsy needed one.
+//      Gmail's actual read API (gmail.googleapis.com) does support CORS
+//      for bearer-token GET requests, so — unlike Etsy — the day-to-day
+//      search/read calls below go straight from the browser with no proxy.
+// None of this can be tested against this shop's real inbox in this build:
+// GMAIL_CLIENT_ID is intentionally empty, so Connect is inert until it's
+// set and the relay Worker exists.
+// ============================================================
+const GMAIL_CLIENT_ID = ''; // NOT SET — see block comment above.
+const GMAIL_REDIRECT_URI = window.location.origin;
+const GMAIL_PROXY = 'https://kismet-gmail-proxy.kismetdesignfab.workers.dev'; // placeholder — this Worker does not exist yet
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+
+let gmailAuth = null; // { accessToken, refreshToken, expiresAt, email, error } | null
+function gmailKeyFor(id){ return `kismet-gmail-auth:${id}`; }
+async function persistGmailAuth(){ try{ await appStorage.set(gmailKeyFor(activeProfileId), JSON.stringify(gmailAuth)); }catch(e){} }
+async function loadGmailAuth(){
+  gmailAuth = null; // same reasoning as loadEtsyAuth — never leak one profile's connection into another's
+  try{ const r = await appStorage.get(gmailKeyFor(activeProfileId)); if(r && r.value) gmailAuth = JSON.parse(r.value); }catch(e){}
+}
+async function disconnectGmail(){
+  gmailAuth = null;
+  try{ await appStorage.set(gmailKeyFor(activeProfileId), JSON.stringify(null)); }catch(e){}
+}
+
+async function startGmailAuth(){
+  if(!GMAIL_CLIENT_ID){ alert('Gmail isn\'t connectable on this deployment yet — no Google OAuth Client ID has been configured. See the comment above GMAIL_CLIENT_ID in the code.'); return; }
+  const verifier = randomToken(64);
+  const state = randomToken(16);
+  sessionStorage.setItem('gmail_verifier', verifier);
+  sessionStorage.setItem('gmail_state', state);
+  const challenge = b64url(await sha256(verifier));
+  const params = new URLSearchParams({
+    response_type:'code', client_id:GMAIL_CLIENT_ID, redirect_uri:GMAIL_REDIRECT_URI,
+    scope:GMAIL_SCOPE, access_type:'offline', prompt:'consent', state,
+    code_challenge:challenge, code_challenge_method:'S256',
+  });
+  window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?'+params.toString();
+}
+
+async function handleGmailCallback(){
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get('gmail_code') || (url.searchParams.get('scope')||'').includes('gmail') ? url.searchParams.get('code') : null;
+  // Distinguishing a Gmail vs Etsy OAuth return on the same redirect_uri is
+  // out of scope here since GMAIL_CLIENT_ID is unset and this can't fire in
+  // practice yet; left structured so wiring it in later is a small change,
+  // not a rewrite.
+  return false;
+}
+
+async function ensureFreshGmailToken(){
+  if(!gmailAuth || !gmailAuth.accessToken) return false;
+  if(Date.now() < gmailAuth.expiresAt - 60000) return true;
+  try{
+    const res = await fetch(GMAIL_PROXY + '/token', {
+      method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type:'refresh_token', client_id:GMAIL_CLIENT_ID, refresh_token:gmailAuth.refreshToken }),
+    });
+    if(!res.ok) return false;
+    const data = await res.json();
+    gmailAuth.accessToken = data.access_token;
+    gmailAuth.expiresAt = Date.now() + data.expires_in*1000;
+    await persistGmailAuth();
+    return true;
+  }catch(e){ return false; }
+}
+
+async function gmailFetch(path, opts={}){
+  const ok = await ensureFreshGmailToken();
+  if(!ok) throw new Error('Not connected to Gmail, or the token refresh failed.');
+  return fetch('https://gmail.googleapis.com/gmail/v1'+path, {
+    ...opts,
+    headers: { 'Authorization':`Bearer ${gmailAuth.accessToken}`, ...(opts.headers||{}) },
+  });
+}
+
+// Read-only search, scoped to Etsy's own sale-notification senders. Etsy
+// sends "you made a sale" mail from these addresses; a customer's own
+// purchase confirmations (buying FROM other shops) come from the same
+// domain but different templates/subjects, so the query also excludes the
+// subject lines Etsy uses for a PURCHASE (their word for something this
+// account bought, not sold) to keep this to sales only.
+const GMAIL_SALE_QUERY = '(from:transaction@etsy.com OR from:noreply@etsy.com OR from:etsy.com) ' +
+  '(subject:"you made a sale" OR subject:"you have a new order" OR subject:"ka-ching" OR subject:"Item(s) purchased") ' +
+  '-subject:"order confirmation" -subject:"you purchased" -subject:"receipt for your Etsy purchase"';
+
+// ---------- PARSING ----------
+// Best-effort against Etsy's known sale-notification format. NOT validated
+// against a real sample from this shop — Gmail access wasn't available
+// while this was built (see the session's blocker report). Treat matches
+// as provisional; re-check these patterns against real emails before
+// trusting the numbers it produces.
+function parseEtsySaleEmail(subject, bodyText, headerDate){
+  const text = bodyText || '';
+  const orderMatch = text.match(/order\s*#\s*(\d{6,})/i) || text.match(/order\s*(?:number|id)[:\s]+(\d{6,})/i);
+  const etsyOrderNumber = orderMatch ? orderMatch[1] : null;
+  const orderTotalMatch = text.match(/order\s*total[:\s]*\$?([\d,]+\.\d{2})/i);
+  const orderTotal = orderTotalMatch ? parseFloat(orderTotalMatch[1].replace(/,/g,'')) : null;
+
+  // One order email can list several line items. Etsy's plain-text layout
+  // repeats a block per item; a block only counts as an item if it carries
+  // a quantity or a dollar amount, so unrelated paragraphs (greeting,
+  // footer, shipping address) don't get parsed as phantom items. Order
+  // total / subtotal / shipping / tax lines also carry a dollar amount but
+  // are never an item — excluded explicitly rather than relying on the
+  // qty/price check alone to filter them out.
+  const NON_ITEM_BLOCK = /^(order\s*total|sub\s*total|shipping|tax|discount|sales\s*tax|grand\s*total|item\s*total)/i;
+  const blocks = text.split(/\n\s*\n/).map(b=>b.trim()).filter(Boolean);
+  const items = [];
+  for(const block of blocks){
+    if(NON_ITEM_BLOCK.test(block)) continue;
+    const qtyMatch = block.match(/qty[:\s]+(\d+)/i) || block.match(/quantity[:\s]+(\d+)/i);
+    const priceMatch = block.match(/\$([\d,]+\.\d{2})/);
+    if(!qtyMatch && !priceMatch) continue;
+    const listingUrlMatch = block.match(/etsy\.com\/listing\/(\d+)/i);
+    const listingIdMatch = listingUrlMatch || block.match(/listing[_\s]?id[:\s]+(\d+)/i);
+    const skuMatch = block.match(/sku[:\s]+([A-Za-z0-9\-_.]+)/i);
+    const titleLine = block.split('\n').find(l=>l.trim() && !/^(qty|quantity|sku|\$)/i.test(l.trim()));
+    items.push({
+      listingTitle: titleLine ? titleLine.trim().slice(0,200) : null,
+      sku: skuMatch ? skuMatch[1].trim() : null,
+      etsyListingId: listingIdMatch ? listingIdMatch[1] : null,
+      quantity: qtyMatch ? parseInt(qtyMatch[1],10) : 1,
+      itemPrice: priceMatch ? parseFloat(priceMatch[1].replace(/,/g,'')) : null,
+    });
+  }
+  return { etsyOrderNumber, items, orderTotal, saleAt: headerDate || null };
+}
+
+// ---------- PRODUCT MASTER MATCHING ----------
+// WB.listings IS the Product Master here — no second product database.
+// Order, per the spec: Etsy Listing ID (authoritative) -> SKU (only if it
+// resolves to exactly one listing) -> exact normalized title (only if
+// unambiguous) -> otherwise unmatched/ambiguous, and NEVER guessed.
+function normalizeTitleForMatch(t){
+  return (t||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+}
+function matchSaleToProductMaster(item){
+  if(item.etsyListingId){
+    const byId = WB.listings.find(l=>String(l.etsyListingId)===String(item.etsyListingId));
+    if(byId) return { status:'matched', method:'listingId', sku:byId.sku, listingId:byId.etsyListingId };
+    // A listing ID was present but isn't in this workbook (not yet
+    // imported, or an old/deleted listing) — fall through rather than
+    // stop, since SKU/title might still resolve it.
+  }
+  if(item.sku){
+    const bySku = WB.listings.filter(l=>l.sku===item.sku);
+    if(bySku.length===1) return { status:'matched', method:'sku', sku:bySku[0].sku, listingId:bySku[0].etsyListingId };
+    if(bySku.length>1) return { status:'ambiguous', method:'sku', note:`SKU "${item.sku}" matches ${bySku.length} listings in the Product Master — not guessed.` };
+  }
+  if(item.listingTitle){
+    const norm = normalizeTitleForMatch(item.listingTitle);
+    const byTitle = WB.listings.filter(l=>normalizeTitleForMatch(l.oldTitle)===norm);
+    if(byTitle.length===1) return { status:'matched', method:'title', sku:byTitle[0].sku, listingId:byTitle[0].etsyListingId };
+    if(byTitle.length>1) return { status:'ambiguous', method:'title', note:`Title matches ${byTitle.length} listings in the Product Master — not guessed.` };
+  }
+  return { status:'unmatched', method:null, note:'No Etsy Listing ID, unique SKU, or unambiguous title match found.' };
+}
+
+// ---------- PRICING-EXPERIMENT ENRICHMENT ----------
+// Cohort membership and pre/post price come straight from WB.priceHistory
+// — the same log Price Only / Bulk Price Update already write to. Nothing
+// here creates a second record of what was repriced.
+const PRICE_CHANGE_REFERENCE_DATE = '2026-09-21';
+
+function buildRepricingCohort(){
+  const map = {}; // listingId (string) -> { preChangePrice, postChangePrice, changeDate, changedAt }
+  (WB.priceHistory||[]).forEach(h=>{
+    if(!h.verified) return;
+    if((h.requestedAt||'').slice(0,10) !== PRICE_CHANGE_REFERENCE_DATE) return;
+    const key = String(h.listingId);
+    const existing = map[key];
+    if(!existing){
+      map[key] = { preChangePrice:h.oldPrice, postChangePrice:h.newPrice, changeDate:PRICE_CHANGE_REFERENCE_DATE, changedAt:h.requestedAt };
+    } else {
+      // More than one verified write to the same listing that day (a retry,
+      // say) — keep the EARLIEST price as "before" and the LATEST as
+      // "after", so the experiment reflects the net change for the day.
+      if(h.requestedAt < existing.changedAt) existing.preChangePrice = h.oldPrice;
+      if(h.requestedAt > existing.changedAt){ existing.postChangePrice = h.newPrice; existing.changedAt = h.requestedAt; }
+    }
+  });
+  return map;
+}
+
+function enrichSaleWithPricingExperiment(sale, cohortMap){
+  const key = sale.matchedListingId ? String(sale.matchedListingId) : null;
+  const cohortEntry = key ? cohortMap[key] : null;
+  if(cohortEntry){
+    sale.pricing_cohort = true;
+    sale.price_change_date = cohortEntry.changeDate;
+    sale.pre_change_price = cohortEntry.preChangePrice;
+    sale.post_change_price = cohortEntry.postChangePrice;
+    sale.price_change_amount = (cohortEntry.postChangePrice!=null && cohortEntry.preChangePrice!=null)
+      ? +(cohortEntry.postChangePrice - cohortEntry.preChangePrice).toFixed(2) : null;
+    sale.price_change_percent = (sale.price_change_amount!=null && cohortEntry.preChangePrice)
+      ? +((sale.price_change_amount / cohortEntry.preChangePrice) * 100).toFixed(1) : null;
+    // Cutoff for THIS listing is the exact moment it was actually repriced,
+    // not just "some time on 9/21" — more precise than a single global
+    // cutoff when a bulk run took minutes to work through many listings.
+    sale.sale_period = (sale.saleAt && sale.saleAt < cohortEntry.changedAt) ? 'BEFORE' : (sale.saleAt ? 'AFTER' : null);
+  } else {
+    sale.pricing_cohort = false;
+    sale.price_change_date = null;
+    sale.pre_change_price = null;
+    sale.post_change_price = null;
+    sale.price_change_amount = null;
+    sale.price_change_percent = null;
+    // Control-group sales still get a period, on the SAME reference date,
+    // so cohort and control can be compared on one before/after axis.
+    sale.sale_period = sale.matchStatus==='matched' && sale.saleAt
+      ? (sale.saleAt < PRICE_CHANGE_REFERENCE_DATE+'T00:00:00.000Z' ? 'BEFORE' : 'AFTER')
+      : null;
+  }
+  return sale;
+}
+
+// ---------- DEDUP + PERSISTENCE ----------
+// One row per line item, keyed by gmailMessageId + item index. Never
+// keyed by order number or SKU alone — an order can list several items,
+// and SKUs can repeat, so the message + position is the only thing
+// guaranteed stable across re-runs.
+function existingSaleIds(){ return new Set((WB.sales||[]).map(s=>s.id)); }
+
+function buildSaleRecordsFromEmail(gmailMessageId, subject, bodyText, headerDate, cohortMap){
+  const parsed = parseEtsySaleEmail(subject, bodyText, headerDate);
+  return parsed.items.map((item, idx)=>{
+    const match = matchSaleToProductMaster(item);
+    const sale = {
+      id: `${gmailMessageId}:${idx}`,
+      gmailMessageId, etsyOrderNumber: parsed.etsyOrderNumber,
+      saleAt: parsed.saleAt, listingTitle: item.listingTitle,
+      etsyListingId: item.etsyListingId, sku: item.sku,
+      quantity: item.quantity, itemPrice: item.itemPrice,
+      itemTotal: (item.itemPrice!=null && item.quantity!=null) ? +(item.itemPrice*item.quantity).toFixed(2) : null,
+      orderTotal: parsed.orderTotal,
+      matchStatus: match.status, matchMethod: match.method,
+      matchedSku: match.sku||null, matchedListingId: match.listingId||null, matchNote: match.note||null,
+      importedAt: new Date().toISOString(),
+    };
+    return enrichSaleWithPricingExperiment(sale, cohortMap);
+  });
+}
+
+let gmailSyncRun = null; // { checked, total, currentSubject } while running
+
+// mode: 'historical' (first run — no date floor) or 'incremental' (only
+// messages newer than the last successful sync). A failed run (thrown
+// error, or gmailFetch failing) must NOT advance
+// WB.meta.gmailSyncLastSuccessfulAt — that's checked by the caller, this
+// function only ever returns what happened.
+async function runGmailSalesSync(mode){
+  if(!gmailAuth || !gmailAuth.accessToken) return { ok:false, message:'Not connected to Gmail.' };
+  WB.meta.gmailSyncLastAttemptAt = new Date().toISOString();
+  const cohortMap = buildRepricingCohort();
+  const known = existingSaleIds();
+  let query = GMAIL_SALE_QUERY;
+  if(mode==='incremental' && WB.meta.gmailSyncLastSuccessfulAt){
+    const d = WB.meta.gmailSyncLastSuccessfulAt.slice(0,10).replace(/-/g,'/');
+    query += ` after:${d}`;
+  }
+  gmailSyncRun = { checked:0, total:0, currentSubject:'' };
+  try{
+    let pageToken = null, messageIds = [];
+    do{
+      const res = await gmailFetch(`/users/me/messages?q=${encodeURIComponent(query)}${pageToken?`&pageToken=${pageToken}`:''}`);
+      if(!res.ok){ const t = await res.text(); throw new Error(`Gmail search failed (HTTP ${res.status}): ${t.slice(0,200)}`); }
+      const data = await res.json();
+      messageIds = messageIds.concat((data.messages||[]).map(m=>m.id));
+      pageToken = data.nextPageToken || null;
+    } while(pageToken);
+
+    gmailSyncRun.total = messageIds.length;
+    let added = 0;
+    const newRows = [];
+    for(const id of messageIds){
+      // Never re-fetch a message we've already turned into sale rows —
+      // this IS the idempotency guarantee: running sync again just finds
+      // nothing new to add for messages already represented in WB.sales.
+      if(known.has(`${id}:0`)){ gmailSyncRun.checked++; continue; }
+      const res = await gmailFetch(`/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=Date`);
+      let subject = '', headerDate = null;
+      if(res.ok){
+        const meta = await res.json();
+        const headers = (meta.payload && meta.payload.headers) || [];
+        subject = (headers.find(h=>h.name==='Subject')||{}).value || '';
+        const dateHeader = (headers.find(h=>h.name==='Date')||{}).value;
+        headerDate = dateHeader ? new Date(dateHeader).toISOString() : null;
+      }
+      const bodyRes = await gmailFetch(`/users/me/messages/${id}?format=full`);
+      let bodyText = '';
+      if(bodyRes.ok){
+        const full = await bodyRes.json();
+        bodyText = extractPlainTextFromGmailPayload(full.payload);
+      }
+      const rows = buildSaleRecordsFromEmail(id, subject, bodyText, headerDate, cohortMap);
+      rows.forEach(r=>{ if(!known.has(r.id)){ newRows.push(r); known.add(r.id); added++; } });
+      gmailSyncRun.checked++;
+      gmailSyncRun.currentSubject = subject;
+      await new Promise(r=>setTimeout(r, 150));
+    }
+    WB.sales = (WB.sales||[]).concat(newRows);
+    if(mode==='historical') WB.meta.gmailSyncHistoricalImportDone = true;
+    WB.meta.gmailSyncLastSuccessfulAt = new Date().toISOString();
+    WB.meta.gmailSyncLastError = null;
+    await persistWorkbook();
+    gmailSyncRun = null;
+    return { ok:true, added, checked:messageIds.length };
+  }catch(e){
+    // Last-successful timestamp is deliberately NOT touched here.
+    WB.meta.gmailSyncLastError = e.message;
+    await persistWorkbook();
+    gmailSyncRun = null;
+    return { ok:false, message:e.message };
+  }
+}
+
+function extractPlainTextFromGmailPayload(payload){
+  if(!payload) return '';
+  if(payload.mimeType==='text/plain' && payload.body && payload.body.data) return gmailB64Decode(payload.body.data);
+  let out = '';
+  for(const part of payload.parts||[]) out += extractPlainTextFromGmailPayload(part);
+  return out;
+}
+function gmailB64Decode(data){
+  try{ return decodeURIComponent(escape(atob(data.replace(/-/g,'+').replace(/_/g,'/')))); }catch(e){ return ''; }
+}
+
+// ---------- MANUAL / HISTORICAL IMPORT (bridge until Gmail OAuth exists) ----------
+// Accepts an array of raw {gmailMessageId, subject, bodyText, saleAt} — the
+// same shape a real sync run would hand to buildSaleRecordsFromEmail — so a
+// one-time backfill compiled outside this app can be dropped in through the
+// same matching/enrichment/dedup path, never a separate one.
+function importRawSaleEmails(rawEmails){
+  const cohortMap = buildRepricingCohort();
+  const known = existingSaleIds();
+  let added = 0, skippedDupe = 0;
+  const newRows = [];
+  for(const raw of rawEmails){
+    const rows = buildSaleRecordsFromEmail(raw.gmailMessageId, raw.subject||'', raw.bodyText||'', raw.saleAt||null, cohortMap);
+    rows.forEach(r=>{
+      if(known.has(r.id)){ skippedDupe++; return; }
+      newRows.push(r); known.add(r.id); added++;
+    });
+  }
+  WB.sales = (WB.sales||[]).concat(newRows);
+  return { added, skippedDupe };
+}
+
+// ---------- DAILY STATS AGGREGATION ----------
+// Never rewrites a past sale's price to today's price — every sale record
+// keeps the price actually paid, captured at import time (itemPrice /
+// itemTotal), so the historical baseline can't drift just because a
+// listing's price changed again later.
+function computeSalesStats(startISO, endISO){
+  const rows = (WB.sales||[]).filter(s=>s.saleAt && s.saleAt>=startISO && s.saleAt<endISO);
+  const orders = new Set(rows.map(r=>r.etsyOrderNumber||r.gmailMessageId)).size;
+  const units = rows.reduce((sum,r)=>sum+(r.quantity||0),0);
+  const revenue = +rows.reduce((sum,r)=>sum+(r.itemTotal||0),0).toFixed(2);
+  const uniqueListings = new Set(rows.filter(r=>r.matchedListingId).map(r=>r.matchedListingId)).size;
+
+  const cohortRows = rows.filter(r=>r.pricing_cohort);
+  const controlRows = rows.filter(r=>r.matchStatus==='matched' && !r.pricing_cohort);
+  const unmatchedRows = rows.filter(r=>r.matchStatus!=='matched');
+
+  const groupKey = r => `$${r.pre_change_price}→$${r.post_change_price}`;
+  const byGroup = {};
+  cohortRows.forEach(r=>{
+    const k = groupKey(r);
+    if(!byGroup[k]) byGroup[k] = { units:0, revenue:0 };
+    byGroup[k].units += (r.quantity||0);
+    byGroup[k].revenue = +(byGroup[k].revenue + (r.itemTotal||0)).toFixed(2);
+  });
+
+  return {
+    orders, units, revenue, uniqueListings,
+    cohort: { units: cohortRows.reduce((s,r)=>s+(r.quantity||0),0), revenue: +cohortRows.reduce((s,r)=>s+(r.itemTotal||0),0).toFixed(2) },
+    control: { units: controlRows.reduce((s,r)=>s+(r.quantity||0),0), revenue: +controlRows.reduce((s,r)=>s+(r.itemTotal||0),0).toFixed(2) },
+    byPriceChangeGroup: byGroup,
+    listingsSold: Array.from(new Set(rows.map(r=>r.matchedSku||r.sku||r.listingTitle||'(unknown)'))),
+    unmatched: unmatchedRows,
+  };
+}
+
+function salesStatsForWindow(days){
+  const end = new Date(); end.setUTCHours(23,59,59,999);
+  const start = new Date(end); start.setUTCDate(start.getUTCDate()-days+1); start.setUTCHours(0,0,0,0);
+  return computeSalesStats(start.toISOString(), new Date(end.getTime()+1).toISOString());
+}
+function salesStatsForCalendarDay(offsetDays){
+  const d = new Date(); d.setUTCDate(d.getUTCDate()-offsetDays);
+  const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const end = new Date(start.getTime()+86400000);
+  return computeSalesStats(start.toISOString(), end.toISOString());
+}
+function salesStatsSincePriceChange(){
+  const start = PRICE_CHANGE_REFERENCE_DATE+'T00:00:00.000Z';
+  return computeSalesStats(start, new Date(Date.now()+86400000).toISOString());
+}
+
+// ============================================================
 // PERFORMANCE — appended daily log, not overwritten
 // ============================================================
 function renderStats(){
@@ -5531,7 +5955,10 @@ function renderStats(){
     <tbody>${WB.dailyLog.slice().reverse().map(d=>`<tr><td class="small">${d.date}</td><td>${d.visits}</td><td>${d.orders}</td><td>$${d.revenue}</td></tr>`).join('') || '<tr><td colspan="4" class="small">No daily entries logged yet.</td></tr>'}</tbody>
   </table></div>`;
 
+  html += renderSalesPricingExperimentHtml();
+
   document.getElementById('content').innerHTML = html;
+  wireSalesPricingExperimentHandlers();
   document.getElementById('captureViewsBtn').addEventListener('click', async ()=>{
     const btn = document.getElementById('captureViewsBtn');
     const flash = document.getElementById('captureFlash');
@@ -5596,6 +6023,124 @@ function periodCard(b){
     </div>
     <div class="d down" style="margin-top:12px;">${b.comparison}</div>
   </div>`;
+}
+
+// ---------- SALES / PRICING EXPERIMENT UI ----------
+function salesStatCard(label, stats){
+  return `<div class="card">
+    <div class="k">${escapeHtml(label)}</div>
+    <div class="grid grid-4" style="margin-top:10px; gap:10px;">
+      <div><div class="k" style="margin-bottom:3px;">Orders</div><div style="font-family:'Archivo',sans-serif;font-size:18px;font-weight:700;">${stats.orders}</div></div>
+      <div><div class="k" style="margin-bottom:3px;">Units</div><div style="font-family:'Archivo',sans-serif;font-size:18px;font-weight:700;">${stats.units}</div></div>
+      <div><div class="k" style="margin-bottom:3px;">Revenue</div><div style="font-family:'Archivo',sans-serif;font-size:18px;font-weight:700;">$${stats.revenue.toFixed(2)}</div></div>
+      <div><div class="k" style="margin-bottom:3px;">Listings</div><div style="font-family:'Archivo',sans-serif;font-size:18px;font-weight:700;">${stats.uniqueListings}</div></div>
+    </div>
+    <div class="row2" style="margin-top:10px;">
+      <div class="section-note" style="margin:0;"><b style="color:var(--torch);">Repriced cohort</b>: ${stats.cohort.units} units · $${stats.cohort.revenue.toFixed(2)}</div>
+      <div class="section-note" style="margin:0;"><b style="color:var(--steel);">Unchanged control</b>: ${stats.control.units} units · $${stats.control.revenue.toFixed(2)}</div>
+    </div>
+  </div>`;
+}
+
+function renderSalesPricingExperimentHtml(){
+  const connected = !!(gmailAuth && gmailAuth.accessToken);
+  let html = `<div class="section-title" style="margin-top:30px;"><span class="left">Sales / Pricing Experiment</span></div>
+  <div class="banner ok"><span class="mono">READ-ONLY</span><span class="fill">Reads Etsy sale-notification emails from Gmail to measure the September 21, 2026 price changes. Never modifies Gmail — no labels, no read/unread changes, no archiving, no deletion. Never writes to Etsy.</span></div>`;
+
+  if(!GMAIL_CLIENT_ID){
+    html += `<div class="banner warn"><span class="mono">i</span><span class="fill">Gmail isn't connectable on this deployment yet — no Google OAuth Client ID is configured (separate from Etsy's connection; see the code comment above <code>GMAIL_CLIENT_ID</code>). Use the manual import below in the meantime, or connect Gmail once that's set up.</span></div>`;
+  } else if(!connected){
+    html += `<div class="banner warn" style="max-width:640px;"><span class="mono">i</span><span class="fill">Gmail isn't connected yet.</span></div>
+    <button class="btn primary" id="gmailConnectBtn">Connect Gmail</button>`;
+  } else {
+    html += `<div class="banner ok"><span class="mono">✓</span><span class="fill">Gmail connected${gmailAuth.email?(' as <b>'+escapeHtml(gmailAuth.email)+'</b>'):''}.
+      ${WB.meta.gmailSyncLastSuccessfulAt ? `Last successful sync: ${new Date(WB.meta.gmailSyncLastSuccessfulAt).toLocaleString()}.` : 'Never synced yet.'}</span></div>
+    ${WB.meta.gmailSyncLastError ? `<div class="banner err"><span class="mono">⚠</span><span class="fill">Last sync failed and did NOT advance the sync point: ${escapeHtml(WB.meta.gmailSyncLastError)}</span></div>` : ''}
+    <div class="save-bar" style="border-top:none; padding-top:0;">
+      <button class="btn primary" id="gmailSyncBtn" ${gmailSyncRun?'disabled':''}>${gmailSyncRun?`Syncing… (${gmailSyncRun.checked}/${gmailSyncRun.total})`:(WB.meta.gmailSyncHistoricalImportDone?'Sync new sales':'Run first (historical) sync')}</button>
+      <button class="btn danger" id="gmailDisconnectBtn">Disconnect Gmail</button>
+    </div>`;
+  }
+
+  html += `<div class="section-title" style="margin-top:20px;"><span class="left">Manual / historical import</span></div>
+  <div class="section-note">Bridge for backfilling sales without a live Gmail connection. Paste a JSON array of <code>{gmailMessageId, subject, bodyText, saleAt}</code> — each goes through the exact same parsing, Product Master matching, and dedup as a live sync, so re-importing the same data twice adds nothing new.</div>
+  <div class="card" style="max-width:640px; margin-bottom:16px;">
+    <textarea id="salesImportInput" rows="5" style="width:100%; font-family:'IBM Plex Mono',monospace; font-size:12px;" placeholder='[{"gmailMessageId":"abc123","subject":"You made a sale!","bodyText":"...","saleAt":"2026-09-15T14:00:00.000Z"}]'></textarea>
+    <div class="save-bar"><button class="btn" id="salesImportBtn">Import</button></div>
+    <div class="result-flash" id="salesImportFlash"></div>
+  </div>`;
+
+  if(!(WB.sales||[]).length){
+    html += `<div class="empty-hint">No sales data yet — connect Gmail and sync, or use manual import above.</div>`;
+    return html;
+  }
+
+  const windows = [
+    ['Today', salesStatsForCalendarDay(0)],
+    ['Yesterday', salesStatsForCalendarDay(1)],
+    ['Since price change (9/21)', salesStatsSincePriceChange()],
+    ['Last 7 days', salesStatsForWindow(7)],
+    ['Last 14 days', salesStatsForWindow(14)],
+    ['Last 30 days', salesStatsForWindow(30)],
+  ];
+  html += `<div class="section-note" style="margin-top:20px;">Revenue and unit counts only — this shop's Etsy stats don't give per-sale traffic, so no conversion-rate claim is made here about whether the price change helped or hurt. A sale keeps the price actually paid at the time; past totals never get rewritten to today's price.</div>`;
+  html += `<div class="grid grid-2" style="gap:12px;">${windows.map(([label,stats])=>salesStatCard(label,stats)).join('')}</div>`;
+
+  const sinceChange = salesStatsSincePriceChange();
+  const groupRows = Object.entries(sinceChange.byPriceChangeGroup);
+  if(groupRows.length){
+    html += `<div class="section-title" style="margin-top:20px;"><span class="left">Sales by price-change group, since 9/21</span></div>
+    <div class="card-scroll"><table class="simple-table">
+      <thead><tr><th>Group</th><th>Units</th><th>Revenue</th></tr></thead>
+      <tbody>${groupRows.map(([k,v])=>`<tr><td class="small">${escapeHtml(k)}</td><td class="small">${v.units}</td><td class="small">$${v.revenue.toFixed(2)}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+  }
+
+  const allUnmatched = (WB.sales||[]).filter(s=>s.matchStatus!=='matched');
+  html += `<div class="section-title" style="margin-top:20px;"><span class="left">Unmatched sales requiring review (${allUnmatched.length})</span></div>`;
+  if(allUnmatched.length){
+    html += `<div class="card-scroll" style="max-height:300px;"><table class="simple-table">
+      <thead><tr><th>Order</th><th>Title / SKU</th><th>Date</th><th>Status</th><th>Why</th></tr></thead>
+      <tbody>${allUnmatched.slice().reverse().map(s=>`<tr>
+        <td class="small">${escapeHtml(s.etsyOrderNumber||'')}</td>
+        <td class="small">${escapeHtml(s.listingTitle||'')} ${s.sku?('<span class="section-note" style="margin:0;">SKU '+escapeHtml(s.sku)+'</span>'):''}</td>
+        <td class="small">${s.saleAt?new Date(s.saleAt).toLocaleDateString():''}</td>
+        <td class="small"><b style="color:var(--torch);">${s.matchStatus.toUpperCase()}</b></td>
+        <td class="small">${escapeHtml(s.matchNote||'')}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  } else {
+    html += `<div class="empty-hint">Nothing to review — every sale matched a Product Master listing.</div>`;
+  }
+
+  return html;
+}
+
+function wireSalesPricingExperimentHandlers(){
+  const connectBtn = document.getElementById('gmailConnectBtn');
+  if(connectBtn) connectBtn.addEventListener('click', startGmailAuth);
+  const disconnectBtn = document.getElementById('gmailDisconnectBtn');
+  if(disconnectBtn) disconnectBtn.addEventListener('click', async ()=>{ await disconnectGmail(); renderStats(); });
+  const syncBtn = document.getElementById('gmailSyncBtn');
+  if(syncBtn) syncBtn.addEventListener('click', async ()=>{
+    const mode = WB.meta.gmailSyncHistoricalImportDone ? 'incremental' : 'historical';
+    const r = await runGmailSalesSync(mode);
+    renderStats();
+    if(!r.ok) alert('Sync failed: '+r.message); else alert(`Sync complete. ${r.added} new sale line item(s) added (${r.checked} message(s) checked).`);
+  });
+  const importBtn = document.getElementById('salesImportBtn');
+  if(importBtn) importBtn.addEventListener('click', async ()=>{
+    const text = document.getElementById('salesImportInput').value;
+    const flash = document.getElementById('salesImportFlash');
+    let rawEmails;
+    try{ rawEmails = JSON.parse(text); if(!Array.isArray(rawEmails)) throw new Error('must be a JSON array'); }
+    catch(e){ flash.className='result-flash show err'; flash.textContent='Invalid JSON: '+e.message; return; }
+    const r = importRawSaleEmails(rawEmails);
+    await persistWorkbook();
+    renderStats();
+    const f = document.getElementById('salesImportFlash');
+    if(f){ f.className='result-flash show ok'; f.textContent = `Imported ${r.added} new sale line item(s), skipped ${r.skippedDupe} already-known.`; }
+  });
 }
 
 // ============================================================
@@ -8061,6 +8606,7 @@ document.getElementById('batchFileInput').addEventListener('change', async (e)=>
   await loadProfiles();
   await loadState();
   await loadEtsyAuth();
+  await loadGmailAuth();
   await loadCurrentUser();
   if(currentUser) cloudShopsCache = await listCloudShops();
   const cameFromEtsy = await handleEtsyCallback();
