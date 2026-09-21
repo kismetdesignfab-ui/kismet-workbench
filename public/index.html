@@ -7173,16 +7173,18 @@ async function stagePriceOnly(l, newPriceStr){
   return { ok:true, blocked: blockers.length>0 };
 }
 
-async function applyPriceOnly(){
-  if(!priceOnlyState || priceOnlyState.blockers.length) return { ok:false, message:'Nothing staged, or this listing is blocked.' };
-  const { listingId, sku, inventory, newPrice, currentPrice } = priceOnlyState;
+// Shared by single Price Only and Bulk Price Update — the ONLY place that
+// actually writes a price to Etsy. Every caller must pass inventory fetched
+// immediately beforehand (never a stale/cached snapshot at write time), so
+// this always rebuilds the PUT body from what Etsy just returned, carrying
+// every field except price through unchanged, then verifies against a fresh
+// read-back before calling anything a success. Never touches title, tags,
+// description, SKU, files, images, or quantity — those simply aren't in
+// this body at all.
+async function writePriceOnlyToEtsy(listingId, sku, inventory, newPrice, currentPrice){
   const product = inventory.products[0];
   const offering = product.offerings[0];
 
-  // Rebuild the PUT body from exactly what Etsy just returned. Every field
-  // that isn't the price is carried over unchanged — sku, property_values,
-  // quantity, is_enabled, readiness_state_id — so the only thing that can
-  // possibly change on Etsy's side is the price.
   const body = {
     products: [{
       sku: product.sku,
@@ -7213,14 +7215,12 @@ async function applyPriceOnly(){
       const t = await res.text();
       logEntry.message = `Etsy rejected the price update (HTTP ${res.status}): ${t.slice(0,300)}`;
       WB.priceHistory.push(logEntry); await persistWorkbook();
-      priceOnlyState = null;
-      return { ok:false, message: logEntry.message };
+      return { ok:false, verified:false, message: logEntry.message };
     }
   }catch(e){
     logEntry.message = 'Price update failed: '+e.message;
     WB.priceHistory.push(logEntry); await persistWorkbook();
-    priceOnlyState = null;
-    return { ok:false, message: logEntry.message };
+    return { ok:false, verified:false, message: logEntry.message };
   }
 
   // Never trust the write response as proof — read the listing back fresh
@@ -7250,8 +7250,224 @@ async function applyPriceOnly(){
     if(l) l.price = verifiedPrice.toFixed(2);
   }
   await persistWorkbook();
+  return { ok:verified, verified, message: logEntry.message };
+}
+
+async function applyPriceOnly(){
+  if(!priceOnlyState || priceOnlyState.blockers.length) return { ok:false, message:'Nothing staged, or this listing is blocked.' };
+  const { listingId, sku, inventory, newPrice, currentPrice } = priceOnlyState;
+  const result = await writePriceOnlyToEtsy(listingId, sku, inventory, newPrice, currentPrice);
   priceOnlyState = null;
-  return { ok:verified, message: logEntry.message };
+  return result;
+}
+
+// ============================================================
+// BULK PRICE UPDATE — same isolated write path as single Price Only, just
+// looped over a list. It calls writePriceOnlyToEtsy() for each row and
+// nothing else — no other function, no other field, ever gets touched.
+// A listing with variations/multiple offerings is blocked exactly like the
+// single flow. Requires the same confirmation word already used everywhere
+// else in this app for a write that touches more than one listing at once.
+//
+// CSV schema:
+//   Required, one of:  "SKU" (Kismet SKU) | "Etsy Listing ID"
+//   Required:          "New Price" (also accepts "Suggested Price" or "Price")
+//   Everything else in the file is ignored — extra columns are fine.
+// Listing ID is always preferred when present, because SKUs in this shop
+// can be missing or duplicated; a SKU that matches more than one listing
+// is flagged as ambiguous and never guessed at.
+// ============================================================
+const BULK_PRICE_HEADER_ALIASES = {
+  sku: ['sku','kismet sku'],
+  listingId: ['etsy listing id','listing id','etsylistingid'],
+  price: ['new price','suggested price','price'],
+};
+
+function parseSimpleCsv(text){
+  // Minimal RFC4180-ish parser: handles quoted fields, escaped quotes, and
+  // commas/newlines inside quotes. Good enough for a small SKU+price file.
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for(let i=0; i<text.length; i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ','){ row.push(field); field = ''; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row = []; field = ''; }
+      else if(c === '\r'){ /* skip, \n handles the line break */ }
+      else field += c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r=>r.some(c=>c.trim().length));
+}
+
+function findHeaderIndex(headerRow, aliases){
+  const norm = headerRow.map(h=>h.trim().toLowerCase());
+  for(const alias of aliases){
+    const idx = norm.indexOf(alias);
+    if(idx !== -1) return idx;
+  }
+  return -1;
+}
+
+// Returns { parsed: [{ raw, matchType, matchValue, newPrice }], errors: [{ raw, reason }] }
+// Never guesses: a row missing an identifier or a price is an error, not skipped silently.
+function parseBulkPriceCsv(text){
+  const rows = parseSimpleCsv(text);
+  if(!rows.length) return { parsed:[], errors:[], headerError:'Empty file.' };
+  const header = rows[0];
+  const skuIdx = findHeaderIndex(header, BULK_PRICE_HEADER_ALIASES.sku);
+  const listingIdIdx = findHeaderIndex(header, BULK_PRICE_HEADER_ALIASES.listingId);
+  const priceIdx = findHeaderIndex(header, BULK_PRICE_HEADER_ALIASES.price);
+  if(skuIdx===-1 && listingIdIdx===-1){
+    return { parsed:[], errors:[], headerError:'No "SKU" or "Etsy Listing ID" column found in the header row.' };
+  }
+  if(priceIdx===-1){
+    return { parsed:[], errors:[], headerError:'No "New Price" (or "Suggested Price"/"Price") column found in the header row.' };
+  }
+  const parsed = [], errors = [];
+  for(const r of rows.slice(1)){
+    const raw = r.join(', ');
+    const skuVal = skuIdx!==-1 ? (r[skuIdx]||'').trim() : '';
+    const listingIdVal = listingIdIdx!==-1 ? (r[listingIdIdx]||'').trim() : '';
+    const priceVal = (r[priceIdx]||'').trim();
+    const newPrice = parseFloat(priceVal.replace(/[$,]/g,''));
+    if(!(newPrice > 0)){ errors.push({ raw, reason:`Invalid price "${priceVal}"` }); continue; }
+    if(listingIdVal){ parsed.push({ raw, matchType:'listingId', matchValue: listingIdVal, newPrice }); }
+    else if(skuVal){ parsed.push({ raw, matchType:'sku', matchValue: skuVal, newPrice }); }
+    else { errors.push({ raw, reason:'No SKU or Etsy Listing ID on this row' }); }
+  }
+  return { parsed, errors };
+}
+
+function resolveBulkPriceRow(row){
+  if(row.matchType==='listingId'){
+    const l = WB.listings.find(x=>String(x.etsyListingId)===String(row.matchValue));
+    if(!l) return { error:`No listing with Etsy Listing ID ${row.matchValue}` };
+    return { listing:l };
+  }
+  const matches = WB.listings.filter(x=>x.sku===row.matchValue);
+  if(matches.length===0) return { error:`SKU "${row.matchValue}" not found` };
+  if(matches.length>1) return { error:`SKU "${row.matchValue}" matches ${matches.length} listings — ambiguous, provide Etsy Listing ID instead` };
+  if(!matches[0].etsyListingId) return { error:`SKU "${row.matchValue}" has no Etsy listing ID` };
+  return { listing: matches[0] };
+}
+
+let bulkPriceState = null; // { rows: [...], stagedAt } — rows have .selected for the ones checked to push
+let bulkPriceRun = null;   // { running, cancel, done, total }
+
+async function stageBulkPrice(csvText){
+  const { parsed, errors, headerError } = parseBulkPriceCsv(csvText);
+  if(headerError) return { ok:false, message: headerError };
+  if(!parsed.length && !errors.length) return { ok:false, message:'No data rows found.' };
+  if(!etsyAuth || !etsyAuth.accessToken) return { ok:false, message:'Not connected to Etsy.' };
+
+  const rows = errors.map(e=>({ status:'error', message:e.reason, raw:e.raw, selected:false }));
+  bulkPriceState = { rows, stagedAt: null };
+  bulkPriceRun = { checked:0, total:parsed.length, currentSku:'' };
+  renderFileAudit();
+
+  for(const row of parsed){
+    const resolved = resolveBulkPriceRow(row);
+    if(resolved.error){
+      rows.push({ status:'error', message: resolved.error, raw:row.raw, selected:false });
+      bulkPriceRun.checked++;
+      renderFileAudit();
+      continue;
+    }
+    const l = resolved.listing;
+    bulkPriceRun.currentSku = l.sku || String(l.etsyListingId);
+    renderFileAudit();
+    let entry;
+    try{
+      const res = await etsyFetch(`/application/listings/${l.etsyListingId}/inventory`);
+      if(!res.ok){
+        const t = await res.text();
+        entry = { status:'error', message:`Couldn't read live inventory (HTTP ${res.status}): ${t.slice(0,200)}`, sku:l.sku, listingId:l.etsyListingId, listingTitle:l.oldTitle||'', selected:false };
+      } else {
+        const inventory = await res.json();
+        const blockers = priceOnlyBlockers(inventory);
+        const product = (inventory.products||[])[0];
+        const offering = product ? (product.offerings||[])[0] : null;
+        const currentPrice = offering ? (offering.price.amount / offering.price.divisor) : null;
+        entry = {
+          status: blockers.length ? 'blocked' : 'ok',
+          message: blockers.join(' '), sku:l.sku, listingId:l.etsyListingId, listingTitle:l.oldTitle||'',
+          currentPrice, newPrice: row.newPrice, selected: blockers.length===0,
+        };
+      }
+    }catch(e){
+      entry = { status:'error', message:'Couldn\'t reach Etsy: '+e.message, sku:l.sku, listingId:l.etsyListingId, listingTitle:l.oldTitle||'', selected:false };
+    }
+    rows.push(entry);
+    bulkPriceRun.checked++;
+    renderFileAudit();
+    await new Promise(r=>setTimeout(r, 150));
+  }
+
+  bulkPriceState = { rows, stagedAt: new Date().toISOString() };
+  bulkPriceRun = null;
+  renderFileAudit();
+  return { ok:true };
+}
+
+async function runBulkPriceUpdate(){
+  if(!bulkPriceState) return;
+  const selected = bulkPriceState.rows.filter(r=>r.status==='ok' && r.selected);
+  if(!selected.length) return;
+  bulkPriceRun = { running:true, cancel:false, done:0, total:selected.length, currentSku:'' };
+  renderFileAudit();
+
+  for(const row of selected){
+    if(bulkPriceRun.cancel){
+      row.resultMessage = 'Stopped by you — this listing was not touched.';
+      row.resultOk = false;
+      continue;
+    }
+    bulkPriceRun.currentSku = row.sku || String(row.listingId);
+    renderFileAudit();
+
+    // Fresh fetch immediately before writing — never reuse the snapshot
+    // taken at staging time, in case anything changed on Etsy since then.
+    let result;
+    try{
+      const res = await etsyFetch(`/application/listings/${row.listingId}/inventory`);
+      if(!res.ok){
+        const t = await res.text();
+        result = { ok:false, message:`Couldn't re-read live inventory before writing (HTTP ${res.status}): ${t.slice(0,200)}` };
+      } else {
+        const inventory = await res.json();
+        const blockers = priceOnlyBlockers(inventory);
+        if(blockers.length){
+          result = { ok:false, message:'Blocked at write time: '+blockers.join(' ') };
+        } else {
+          const product = inventory.products[0];
+          const offering = product.offerings[0];
+          const currentPrice = offering.price.amount / offering.price.divisor;
+          result = await writePriceOnlyToEtsy(row.listingId, row.sku, inventory, row.newPrice, currentPrice);
+        }
+      }
+    }catch(e){
+      result = { ok:false, message:'Couldn\'t reach Etsy: '+e.message };
+    }
+    row.resultOk = result.ok;
+    row.resultMessage = result.message;
+    bulkPriceRun.done++;
+    renderFileAudit();
+    // Rate-conscious like every other bulk action in this app — well under
+    // Etsy's 10/second, and this is up to 3 calls per listing (re-check,
+    // write, verify).
+    await new Promise(r=>setTimeout(r, 500));
+  }
+
+  bulkPriceRun = null;
+  renderFileAudit();
 }
 
 function renderFileAudit(){
@@ -7321,6 +7537,47 @@ function renderFileAudit(){
     }
   }
 
+  html += `<div class="section-title" style="margin-top:30px;"><span class="left">Bulk Price Update</span></div>
+  <div class="banner err"><span class="mono">WRITE</span><span class="fill">Pushes price changes to MULTIPLE listings at once. Uses the exact same isolated write as Price Only above, looped — only ever writes price, never title, tags, description, SKU, files, images, quantity, or listing state. Blocks any listing with variations/multiple offerings exactly like the single flow, and requires your confirmation word before anything is written.</span></div>
+  <div class="section-note">CSV columns: <b>SKU</b> (or <b>Etsy Listing ID</b> — preferred, since SKUs can be missing or duplicated) and <b>New Price</b> (also accepts "Suggested Price" or "Price"). Extra columns are ignored. A SKU that matches more than one listing is flagged, never guessed.</div>
+  <div class="card" style="max-width:640px; margin-bottom:16px;">
+    <div class="field" style="margin-bottom:0;"><label>Paste CSV</label>
+      <textarea id="bulkPriceCsvInput" rows="6" style="width:100%; font-family:'IBM Plex Mono',monospace; font-size:12px;" placeholder="SKU,New Price&#10;0224,15&#10;0200,15"></textarea></div>
+    <div class="save-bar"><button class="btn" id="bulkPriceStageBtn" ${bulkPriceRun?'disabled':''}>${bulkPriceRun?`Checking… (${bulkPriceRun.checked}/${bulkPriceRun.total})`:'Fetch live prices & check'}</button></div>
+    ${bulkPriceRun ? `<div class="section-note">Checking ${escapeHtml(bulkPriceRun.currentSku||'')}…</div>` : ''}
+  </div>`;
+
+  if(bulkPriceState){
+    const okRows = bulkPriceState.rows.filter(r=>r.status==='ok');
+    const blockedRows = bulkPriceState.rows.filter(r=>r.status==='blocked');
+    const errorRows = bulkPriceState.rows.filter(r=>r.status==='error');
+    const selectedCount = okRows.filter(r=>r.selected).length;
+    html += `<div class="card-scroll" style="max-height:360px; margin-bottom:12px;"><table class="simple-table">
+      <thead><tr><th></th><th>SKU</th><th>Listing</th><th>Current → New</th><th>Status</th></tr></thead>
+      <tbody>${bulkPriceState.rows.map((r,idx)=>`<tr>
+        <td class="small">${r.status==='ok'?`<input type="checkbox" data-bulkpricerow="${idx}" ${r.selected?'checked':''}/>`:''}</td>
+        <td class="small">${escapeHtml(r.sku||'(unresolved)')}</td>
+        <td class="small">${escapeHtml(r.listingTitle||r.raw||'')}</td>
+        <td class="small">${r.currentPrice!=null?('$'+r.currentPrice.toFixed(2)+' → $'+r.newPrice.toFixed(2)):''}</td>
+        <td class="small"><b style="color:${r.status==='ok'?'var(--green)':r.status==='blocked'?'var(--torch)':'var(--red)'}">${(r.resultMessage!==undefined) ? (r.resultOk?'DONE — verified':'FAILED') : r.status.toUpperCase()}</b>${r.message?(' '+escapeHtml(r.message)):''}${r.resultMessage?(' '+escapeHtml(r.resultMessage)):''}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    <div class="section-note">${okRows.length} ready, ${blockedRows.length} blocked, ${errorRows.length} error${errorRows.length===1?'':'s'} — ${selectedCount} selected to push.</div>
+    <div class="card" style="max-width:520px; margin-bottom:16px;">
+      <div class="save-bar" style="border-top:none; padding-top:0;">
+        <button class="btn" id="bulkPriceSelectAllBtn">Select all ready</button>
+        <button class="btn" id="bulkPriceSelectNoneBtn">Select none</button>
+      </div>
+      ${WB.meta.pushPassword ? `
+      <div class="field"><label>Type your confirmation word to push</label>
+        <input type="password" id="bulkPriceConfirmInput" placeholder="confirmation word" autocomplete="off"/></div>
+      <div class="save-bar">
+        <button class="btn danger" id="bulkPriceGoBtn" ${(selectedCount===0||bulkPriceRun)?'disabled':''}>${bulkPriceRun?`Applying… (${bulkPriceRun.done}/${bulkPriceRun.total})`:`Push ${selectedCount} price change${selectedCount===1?'':'s'} to Etsy`}</button>
+        ${bulkPriceRun&&bulkPriceRun.running?`<button class="btn" id="bulkPriceCancelRunBtn">Stop</button>`:''}
+      </div>` : `<div class="banner err"><span class="mono">!</span><span class="fill">No confirmation word set yet — set one on the Playbook tab before you can bulk push prices. This is deliberate: it stops an accidental bulk write to live listings.</span></div>`}
+    </div>`;
+  }
+
   if((WB.priceHistory||[]).length){
     html += `<div class="section-title" style="margin-top:20px;"><span class="left">Price Only history</span></div>
     <div class="card-scroll" style="max-height:280px;"><table class="simple-table">
@@ -7369,6 +7626,44 @@ function renderFileAudit(){
   });
   const cancelBtn = document.getElementById('priceOnlyCancelBtn');
   if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ priceOnlyState = null; renderFileAudit(); });
+
+  const bulkStageBtn = document.getElementById('bulkPriceStageBtn');
+  if(bulkStageBtn) bulkStageBtn.addEventListener('click', async ()=>{
+    const csvText = document.getElementById('bulkPriceCsvInput').value;
+    if(!csvText.trim()){ alert('Paste a CSV first.'); return; }
+    const r = await stageBulkPrice(csvText);
+    if(!r.ok) alert(r.message);
+  });
+  document.querySelectorAll('[data-bulkpricerow]').forEach(cb=> cb.addEventListener('change', (e)=>{
+    const idx = +cb.dataset.bulkpricerow;
+    if(bulkPriceState.rows[idx]) bulkPriceState.rows[idx].selected = e.target.checked;
+    renderFileAudit();
+  }));
+  const selectAllBtn = document.getElementById('bulkPriceSelectAllBtn');
+  if(selectAllBtn) selectAllBtn.addEventListener('click', ()=>{
+    bulkPriceState.rows.forEach(r=>{ if(r.status==='ok') r.selected = true; });
+    renderFileAudit();
+  });
+  const selectNoneBtn = document.getElementById('bulkPriceSelectNoneBtn');
+  if(selectNoneBtn) selectNoneBtn.addEventListener('click', ()=>{
+    bulkPriceState.rows.forEach(r=>{ if(r.status==='ok') r.selected = false; });
+    renderFileAudit();
+  });
+  const bulkGoBtn = document.getElementById('bulkPriceGoBtn');
+  if(bulkGoBtn) bulkGoBtn.addEventListener('click', async ()=>{
+    const typed = (document.getElementById('bulkPriceConfirmInput')||{}).value || '';
+    if(typed !== WB.meta.pushPassword){
+      alert('That doesn\'t match your confirmation word. This is deliberate friction before writing to live listings.');
+      return;
+    }
+    const selected = bulkPriceState.rows.filter(r=>r.status==='ok' && r.selected);
+    if(!confirm(`Change the LIVE Etsy price on ${selected.length} listing${selected.length===1?'':'s'}?\n\nOnly price is written on each — nothing else is touched. Each listing is re-checked and its price verified individually before this counts as done.`)) return;
+    await runBulkPriceUpdate();
+  });
+  const bulkCancelRunBtn = document.getElementById('bulkPriceCancelRunBtn');
+  if(bulkCancelRunBtn) bulkCancelRunBtn.addEventListener('click', ()=>{
+    if(bulkPriceRun) bulkPriceRun.cancel = true;
+  });
 }
 
 
