@@ -6982,52 +6982,113 @@ function classifyListingFiles(files){
   return 'REVIEW';
 }
 
-let fileAuditRun = null; // { checked, total } while a run is in progress; null when idle
+let fileAuditRun = null; // { checked, total, currentSku, currentTitle, mode } while a run is in progress; null when idle
+const FILE_AUDIT_BATCH_SIZE = 50;  // how often progress is actually persisted to storage
+const FILE_AUDIT_TIMEOUT_MS = 15000; // a hung Etsy request becomes ERROR instead of stalling the whole run
 
-async function runFileAudit(){
-  const targets = WB.listings.filter(l=>l.etsyListingId);
-  if(!targets.length) return { ok:false, message:'No listings with an Etsy listing ID to audit — import listings from Etsy first.' };
-  if(!etsyAuth || !etsyAuth.shopId) return { ok:false, message:'Not connected to Etsy.' };
-  fileAuditRun = { checked:0, total:targets.length };
-  renderFileAudit();
-  const bySku = {}; (WB.fileAudits||[]).forEach(a=>bySku[a.sku]=a);
+// Keyed by Etsy listing ID, never SKU — SKUs can be missing or duplicated
+// across listings, and keying on one would let two different listings'
+// audit results silently overwrite each other.
+function fileAuditByListingId(){
+  const map = {};
+  (WB.fileAudits||[]).forEach(r=>{ map[String(r.listingId)] = r; });
+  return map;
+}
+
+async function auditOneListing(l){
   const auditedAt = new Date().toISOString();
-  for(const l of targets){
-    let record;
-    try{
-      const res = await etsyFetch(`/application/shops/${etsyAuth.shopId}/listings/${l.etsyListingId}/files`);
-      if(!res.ok){
-        const t = await res.text();
-        record = {
-          sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
-          files: [], attachmentCount: 0, classification: 'ERROR',
-          error: `HTTP ${res.status}: ${t.slice(0,200)}`, auditedAt,
-        };
-      } else {
-        const data = await res.json();
-        const files = (data.results||[]).map(f=>({
-          filename: f.filename||'', filetype: f.filetype||'', sizeBytes: (f.size_bytes ?? null), filesize: f.filesize||'',
-        }));
-        record = {
-          sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
-          files, attachmentCount: files.length, classification: classifyListingFiles(files),
-          error: null, auditedAt,
-        };
-      }
-    }catch(e){
-      record = {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(()=>controller.abort(), FILE_AUDIT_TIMEOUT_MS);
+  try{
+    const res = await etsyFetch(`/application/shops/${etsyAuth.shopId}/listings/${l.etsyListingId}/files`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if(!res.ok){
+      const t = await res.text();
+      return {
         sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
-        files: [], attachmentCount: 0, classification: 'ERROR', error: e.message, auditedAt,
+        files: [], attachmentCount: 0, classification: 'ERROR',
+        error: `HTTP ${res.status}: ${t.slice(0,200)}`, auditedAt,
       };
     }
-    bySku[l.sku] = record;
+    const data = await res.json();
+    const files = (data.results||[]).map(f=>({
+      filename: f.filename||'', filetype: f.filetype||'', sizeBytes: (f.size_bytes ?? null), filesize: f.filesize||'',
+    }));
+    return {
+      sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
+      files, attachmentCount: files.length, classification: classifyListingFiles(files),
+      error: null, auditedAt,
+    };
+  }catch(e){
+    clearTimeout(timeoutId);
+    const timedOut = e.name === 'AbortError';
+    return {
+      sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
+      files: [], attachmentCount: 0, classification: 'ERROR',
+      error: timedOut ? `Timed out after ${FILE_AUDIT_TIMEOUT_MS/1000}s` : e.message, auditedAt,
+    };
+  }
+}
+
+// mode: 'all' (re-check everything), 'resume' (only listings with NO audit
+// record yet — a genuinely interrupted/never-reached listing — leaving
+// ERROR records alone), 'retryErrors' (only listings whose last audit came
+// back ERROR). Resume and Retry Errors are deliberately non-overlapping: a
+// listing that errored stays untouched by Resume until you choose to retry
+// it specifically.
+async function runFileAuditBatch(mode){
+  const all = WB.listings.filter(l=>l.etsyListingId);
+  if(!all.length) return { ok:false, message:'No listings with an Etsy listing ID to audit — import listings from Etsy first.' };
+  if(!etsyAuth || !etsyAuth.shopId) return { ok:false, message:'Not connected to Etsy.' };
+
+  const byId = fileAuditByListingId();
+  let targets = all;
+  if(mode==='resume'){
+    targets = all.filter(l=>!byId[String(l.etsyListingId)]);
+  } else if(mode==='retryErrors'){
+    targets = all.filter(l=>{ const r = byId[String(l.etsyListingId)]; return r && r.classification==='ERROR'; });
+  }
+  if(!targets.length){
+    if(mode==='retryErrors') return { ok:false, message:'No errored listings to retry.' };
+    if(mode==='resume'){
+      const errorCount = Object.values(byId).filter(r=>r.classification==='ERROR').length;
+      return { ok:false, message: errorCount
+        ? `Every listing has been attempted — nothing left unaudited. ${errorCount} listing(s) errored; use Retry Errors for those.`
+        : 'Nothing to do — every listing already has an audit record.' };
+    }
+    return { ok:false, message:'Nothing to do.' };
+  }
+
+  fileAuditRun = { checked:0, total:targets.length, currentSku:'', currentTitle:'', currentListingId:'', mode };
+  renderFileAudit();
+
+  let sinceSave = 0;
+  for(const l of targets){
+    fileAuditRun.currentSku = l.sku||'(no SKU)';
+    fileAuditRun.currentTitle = l.oldTitle||'';
+    fileAuditRun.currentListingId = l.etsyListingId;
+    renderFileAudit();
+
+    const record = await auditOneListing(l);
+    byId[String(l.etsyListingId)] = record;
     fileAuditRun.checked++;
+    sinceSave++;
+    renderFileAudit();
+
+    // Saves progress every batch rather than only once at the very end, so
+    // a stopped/closed run doesn't lose everything it already checked.
+    if(sinceSave >= FILE_AUDIT_BATCH_SIZE){
+      WB.fileAudits = Object.values(byId);
+      WB.meta.lastFileAuditAt = new Date().toISOString();
+      await persistWorkbook();
+      sinceSave = 0;
+    }
     // Read-only, but hundreds of listings shouldn't hammer Etsy's rate
     // limit in a tight loop — a small stagger between calls.
     await new Promise(r=>setTimeout(r, 150));
   }
-  WB.fileAudits = Object.values(bySku);
-  WB.meta.lastFileAuditAt = auditedAt;
+  WB.fileAudits = Object.values(byId);
+  WB.meta.lastFileAuditAt = new Date().toISOString();
   fileAuditRun = null;
   await persistWorkbook();
   renderFileAudit();
@@ -7042,7 +7103,7 @@ function fileAuditTotals(){
 }
 
 function fileAuditCsv(){
-  const header = ['SKU','Listing ID','Listing Title','Attachment Count','Classification','Filename','File Type','Size (bytes)','Audited At'];
+  const header = ['Kismet SKU','Etsy Listing ID','Etsy Listing Title','Attachment Count','Classification','Filename','File Type','Size (bytes)','Audited At'];
   const rows = [header];
   (WB.fileAudits||[]).forEach(r=>{
     if(!r.files.length){
@@ -7200,9 +7261,14 @@ function renderFileAudit(){
   <div class="section-note">Checks every listing that has an Etsy listing ID (${WB.listings.filter(l=>l.etsyListingId).length} right now). ZIP = exactly one zip file attached. Legacy direct files = one or more loose files with no zip — these are REBUILD LAST for cleanup. No files = nothing attached. Review = a mixed or ambiguous package. Error = Etsy couldn't be read for that listing.</div>`;
 
   html += `<div class="save-bar" style="border-top:none; padding-top:0;">
-    <button class="btn primary" id="runFileAuditBtn" ${fileAuditRun?'disabled':''}>${fileAuditRun?`Auditing… (${fileAuditRun.checked}/${fileAuditRun.total})`:'Run File Audit'}</button>
+    <button class="btn primary" id="runFileAuditBtn" ${fileAuditRun?'disabled':''}>Run File Audit</button>
+    <button class="btn" id="resumeFileAuditBtn" ${fileAuditRun?'disabled':''}>Resume Audit</button>
+    <button class="btn" id="retryErrorsFileAuditBtn" ${fileAuditRun?'disabled':''}>Retry Errors</button>
     <button class="btn" id="exportFileAuditBtn" ${(WB.fileAudits||[]).length?'':'disabled'}>Export CSV</button>
   </div>`;
+  if(fileAuditRun){
+    html += `<div class="section-note"><b style="color:var(--ink);">${fileAuditRun.checked} / ${fileAuditRun.total} completed</b> (${escapeHtml(fileAuditRun.mode)}) — checking Etsy listing #${escapeHtml(String(fileAuditRun.currentListingId||''))}${fileAuditRun.currentSku?(' / SKU '+escapeHtml(fileAuditRun.currentSku)):''}${fileAuditRun.currentTitle?(' — '+escapeHtml(fileAuditRun.currentTitle)):''}…</div>`;
+  }
 
   if((WB.fileAudits||[]).length){
     html += `<div class="card" style="max-width:760px; margin-bottom:16px; display:flex; gap:20px; flex-wrap:wrap;">
@@ -7216,8 +7282,8 @@ function renderFileAudit(){
     <div class="section-note">Last run: ${WB.meta.lastFileAuditAt ? new Date(WB.meta.lastFileAuditAt).toLocaleString() : 'never'}</div>
     <div class="card-scroll" style="max-height:420px; margin-bottom:24px;"><table class="simple-table">
       <thead><tr><th>SKU</th><th>Listing</th><th>Attachments</th><th>Files</th><th>Classification</th></tr></thead>
-      <tbody>${(WB.fileAudits||[]).slice().sort((a,b)=>(a.sku||'').localeCompare(b.sku||'')).map(r=>`<tr>
-        <td class="small">${escapeHtml(r.sku)}</td>
+      <tbody>${(WB.fileAudits||[]).slice().sort((a,b)=>String(a.listingId).localeCompare(String(b.listingId))).map(r=>`<tr>
+        <td class="small">${escapeHtml(r.sku||'(no SKU)')}</td>
         <td>${escapeHtml(r.listingTitle||'')} <span class="section-note" style="margin:0;">#${r.listingId}</span></td>
         <td class="small">${r.attachmentCount}</td>
         <td class="small">${escapeHtml((r.files||[]).map(f=>f.filename).join(', ') || (r.error||''))}</td>
@@ -7272,7 +7338,11 @@ function renderFileAudit(){
   document.getElementById('content').innerHTML = html;
 
   const runBtn = document.getElementById('runFileAuditBtn');
-  if(runBtn) runBtn.addEventListener('click', ()=> runFileAudit());
+  if(runBtn) runBtn.addEventListener('click', async ()=>{ const r = await runFileAuditBatch('all'); if(!r.ok) alert(r.message); });
+  const resumeBtn = document.getElementById('resumeFileAuditBtn');
+  if(resumeBtn) resumeBtn.addEventListener('click', async ()=>{ const r = await runFileAuditBatch('resume'); if(!r.ok) alert(r.message); });
+  const retryErrorsBtn = document.getElementById('retryErrorsFileAuditBtn');
+  if(retryErrorsBtn) retryErrorsBtn.addEventListener('click', async ()=>{ const r = await runFileAuditBatch('retryErrors'); if(!r.ok) alert(r.message); });
   const exportBtn = document.getElementById('exportFileAuditBtn');
   if(exportBtn) exportBtn.addEventListener('click', ()=> downloadTextFile(`file-audit-${todayISO}.csv`, fileAuditCsv(), 'text/csv'));
 
