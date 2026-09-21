@@ -5488,21 +5488,26 @@ function renderAttention(){
 // not the grant itself. Connecting requires, before any of this can
 // actually run:
 //   1. A Google Cloud project with the Gmail API enabled
-//   2. An OAuth 2.0 Client ID registered there (Web application type)
+//   2. An OAuth 2.0 Client ID registered there (Web application type),
+//      with this deployment's exact origin as an authorized redirect URI
 //   3. That Client ID pasted into GMAIL_CLIENT_ID below
-//   4. A small relay Worker (same shape/purpose as kismet-etsy-proxy) to do
-//      the token exchange server-side — Google's token endpoint doesn't
-//      support CORS from a browser origin, same reason Etsy needed one.
+//   4. A relay Worker to do the token exchange server-side — Google's
+//      token endpoint doesn't support CORS from a browser origin, same
+//      reason Etsy needed one. This one (kismet-gmail-proxy) exists and is
+//      deployed; it also injects the OAuth Client Secret Google requires
+//      for this exchange (from its own Cloudflare env, GOOGLE_CLIENT_ID /
+//      GOOGLE_CLIENT_SECRET — never sent to or stored in this browser).
 //      Gmail's actual read API (gmail.googleapis.com) does support CORS
 //      for bearer-token GET requests, so — unlike Etsy — the day-to-day
 //      search/read calls below go straight from the browser with no proxy.
 // None of this can be tested against this shop's real inbox in this build:
-// GMAIL_CLIENT_ID is intentionally empty, so Connect is inert until it's
-// set and the relay Worker exists.
+// GMAIL_CLIENT_ID is intentionally empty, so Connect is inert until step 3
+// is done (steps 1-2 are the user's own Google Cloud Console; step 4 is
+// already deployed).
 // ============================================================
 const GMAIL_CLIENT_ID = ''; // NOT SET — see block comment above.
 const GMAIL_REDIRECT_URI = window.location.origin;
-const GMAIL_PROXY = 'https://kismet-gmail-proxy.kismetdesignfab.workers.dev'; // placeholder — this Worker does not exist yet
+const GMAIL_PROXY = 'https://kismet-gmail-proxy.kismetdesignfab.workers.dev';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 
 let gmailAuth = null; // { accessToken, refreshToken, expiresAt, email, error } | null
@@ -5532,14 +5537,57 @@ async function startGmailAuth(){
   window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?'+params.toString();
 }
 
+// Called on every page load, BEFORE handleEtsyCallback(). Both Etsy and
+// Gmail redirect back to this exact same bare origin (no distinguishing
+// path), so the random `state` value each flow generated for itself
+// (sessionStorage 'gmail_state' vs 'etsy_state') is what tells a Gmail
+// return apart from an Etsy one — not the URL shape, which is identical.
+// If this session never started a Gmail login (no 'gmail_state' saved) or
+// the state doesn't match, this isn't ours: return false and leave the URL
+// completely untouched for handleEtsyCallback to check instead.
 async function handleGmailCallback(){
   const url = new URL(window.location.href);
-  const code = url.searchParams.get('gmail_code') || (url.searchParams.get('scope')||'').includes('gmail') ? url.searchParams.get('code') : null;
-  // Distinguishing a Gmail vs Etsy OAuth return on the same redirect_uri is
-  // out of scope here since GMAIL_CLIENT_ID is unset and this can't fire in
-  // practice yet; left structured so wiring it in later is a small change,
-  // not a rewrite.
-  return false;
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const err = url.searchParams.get('error');
+  if(!code && !err) return false;
+  const savedState = sessionStorage.getItem('gmail_state');
+  if(!savedState || state !== savedState) return false;
+  window.history.replaceState({}, '', window.location.pathname); // clear the code out of the address bar either way
+
+  if(err){
+    gmailAuth = { error: 'Google declined the connection: ' + (url.searchParams.get('error_description') || err) };
+    return true;
+  }
+  const verifier = sessionStorage.getItem('gmail_verifier');
+  if(!verifier){
+    gmailAuth = { error: 'Login state did not match — restart the connect flow (this can happen if the tab was reloaded mid-login).' };
+    return true;
+  }
+  try{
+    const res = await fetch(GMAIL_PROXY + '/token', {
+      method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:'authorization_code', redirect_uri:GMAIL_REDIRECT_URI,
+        code, code_verifier:verifier,
+      }),
+    });
+    if(!res.ok){
+      const t = await res.text();
+      gmailAuth = { error: `Google rejected the token exchange (HTTP ${res.status}): ${t.slice(0,400)}` };
+      return true;
+    }
+    const data = await res.json();
+    gmailAuth = {
+      accessToken: data.access_token, refreshToken: data.refresh_token,
+      expiresAt: Date.now() + data.expires_in*1000,
+    };
+    await persistGmailAuth();
+  }catch(e){
+    // most likely CORS or the proxy not being reachable
+    gmailAuth = { error: 'Could not reach the Gmail token proxy: ' + e.message };
+  }
+  return true;
 }
 
 async function ensureFreshGmailToken(){
@@ -6060,6 +6108,9 @@ function renderSalesPricingExperimentHtml(){
   let html = `<div class="section-title" style="margin-top:30px;"><span class="left">Sales / Pricing Experiment</span></div>
   <div class="banner ok"><span class="mono">READ-ONLY</span><span class="fill">Reads Etsy sale-notification emails from Gmail to measure the September 21, 2026 price changes. Never modifies Gmail — no labels, no read/unread changes, no archiving, no deletion. Never writes to Etsy.</span></div>`;
 
+  if(gmailAuth && gmailAuth.error){
+    html += `<div class="banner err"><span class="mono">⚠</span><span class="fill">${escapeHtml(gmailAuth.error)}</span></div>`;
+  }
   if(!GMAIL_CLIENT_ID){
     html += `<div class="banner warn"><span class="mono">i</span><span class="fill">Gmail isn't connectable on this deployment yet — no Google OAuth Client ID is configured (separate from Etsy's connection; see the code comment above <code>GMAIL_CLIENT_ID</code>). Use the manual import below in the meantime, or connect Gmail once that's set up.</span></div>`;
   } else if(!connected){
@@ -8622,8 +8673,10 @@ document.getElementById('batchFileInput').addEventListener('change', async (e)=>
   await loadGmailAuth();
   await loadCurrentUser();
   if(currentUser) cloudShopsCache = await listCloudShops();
+  const cameFromGmail = await handleGmailCallback(); // must run first — see the comment on handleGmailCallback for why
   const cameFromEtsy = await handleEtsyCallback();
   if(cameFromEtsy){ uiState.lastTab = 'etsy'; saveUiState(); }
+  else if(cameFromGmail){ uiState.lastTab = 'stats'; saveUiState(); } // land back where the Sales / Pricing Experiment card lives
   else if(setupComplete()){ uiState.lastTab = 'dashboard'; } // always open on Dashboard, not wherever you left off
   render();
   document.getElementById('mobileMenuBtn').addEventListener('click', openMobileMenu);
