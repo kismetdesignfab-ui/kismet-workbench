@@ -6187,7 +6187,14 @@ function renderTopbarActions(){
 // instead of pretending to succeed.
 // ============================================================
 const ETSY_CLIENT_ID = '1yj1856zxupz5kjguxr8913m';
-const ETSY_REDIRECT_URI = 'https://soft-hall-7798.kismetdesignfab.workers.dev';
+// Must be the origin that's actually serving the app right now, not a fixed
+// production URL — a hardcoded value here silently bounces the OAuth
+// callback to a DIFFERENT deployment (e.g. a preview Worker connecting Etsy
+// would land back on production instead, running whatever code is live
+// there). Etsy's app settings must have every origin this runs on
+// (production and any preview Worker) registered as an allowed callback URL,
+// or the authorize step itself will reject with a redirect_uri mismatch.
+const ETSY_REDIRECT_URI = window.location.origin;
 // Etsy blocks direct browser calls to its token and API endpoints (CORS).
 // This small relay Worker forwards those two calls server-to-server, where
 // CORS doesn't apply, and hands the response straight back unmodified.
