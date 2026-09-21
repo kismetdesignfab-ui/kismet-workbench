@@ -960,6 +960,7 @@ function seedWorkbook(){
     keywordQueue: [],    // { keyword, addedFrom (sku or 'manual'), addedDate } — candidates not yet looked up
     audit: SEED_AUDIT.slice(), // one-time historical snapshot from Kismet's original workbook — sample-only
     projects: [], snapshots: [], pushLog: [], skuIssues: { checkedAt:null, missing:[], dupes:[] }, viewSnapshots: [], shopSections: [],
+    fileAudits: [], priceHistory: [],
     aiRules: KISMET_AI_RULES,
   };
 }
@@ -1236,6 +1237,8 @@ function emptyWorkbook(){
     snapshots: [],  // { sku, takenAt, projectId, title, tags[], description } — restore points
     pushLog: [],    // { sku, projectId, projectName, fields[], pushedAt } — every successful push, for reporting
     skuIssues: { checkedAt:null, missing:[], dupes:[] }, viewSnapshots: [], shopSections: [],
+    fileAudits: [],   // { sku, listingId, listingTitle, files[], attachmentCount, classification, auditedAt, error } — File Audit, read-only
+    priceHistory: [], // { sku, listingId, oldPrice, newPrice, requestedAt, verified, message } — Price Only write log
     aiRules: DEFAULT_AI_RULES,
   };
 }
@@ -1346,6 +1349,8 @@ async function loadState(){
   if(WB.meta.seoResearchVersion === undefined) WB.meta.seoResearchVersion = '';
   WB.projects.forEach(p=>{ if(p.targetShopSectionId===undefined) p.targetShopSectionId = null; });
   if(!Array.isArray(WB.pushLog)) WB.pushLog = [];
+  if(!Array.isArray(WB.fileAudits)) WB.fileAudits = [];
+  if(!Array.isArray(WB.priceHistory)) WB.priceHistory = [];
   if(!WB.meta.dismissedAttention) WB.meta.dismissedAttention = {};
   if(WB.meta.targetBuyer === undefined) WB.meta.targetBuyer = '';
   if(WB.meta.notTargetBuyer === undefined) WB.meta.notTargetBuyer = '';
@@ -1680,6 +1685,7 @@ const WORK_TABS = [
   { id:'attention', tag:'05', label:'Needs Attention' },
   { id:'completion',tag:'06', label:'Completion Log' },
   { id:'stats',     tag:'07', label:'Performance' },
+  { id:'fileAudit', tag:'08', label:'File Audit + Price Only' },
 ];
 const SETUP_TABS = [
   { id:'setup',     tag:'', label:'Setup' },
@@ -6910,6 +6916,360 @@ function renderEtsy(){
   const discBtn = document.getElementById('etsyDisconnectBtn'); if(discBtn) discBtn.addEventListener('click', async ()=>{ await disconnectEtsy(); renderEtsy(); });
 }
 
+// ============================================================
+// FILE AUDIT + PRICE ONLY
+// Two independent, narrowly-scoped tools kept deliberately separate from
+// the project/push system above.
+//
+// File Audit is READ-ONLY: it calls Etsy's listing-files endpoint for every
+// tracked listing and reports what's actually attached right now. There is
+// no write call anywhere in this half of the section — it never uploads,
+// deletes, renames, or replaces a file.
+//
+// Price Only is a second, ISOLATED write path: it changes a single
+// listing's price through Etsy's inventory endpoint, and nothing else. It
+// does not call pushListingToEtsy/buildEtsyDiff/scopeFields, and it does
+// not reference NEVER_WRITABLE — that protection still guards the project
+// push path above exactly as before. Price Only blocks outright on any
+// listing with more than one product or offering (variations) rather than
+// guess how to reconstruct them.
+// ============================================================
+
+function isZipFile(f){
+  return /\.zip$/i.test(f.filename||'') || /zip/i.test(f.filetype||'');
+}
+
+// ZIP = exactly one attachment and it's a zip. Legacy direct files = one or
+// more attachments with no zip among them at all (nothing repackaged).
+// Anything mixing zips and loose files, or with more than one zip, is
+// ambiguous enough to need a human look rather than a guessed label.
+function classifyListingFiles(files){
+  if(!files.length) return 'NO FILES';
+  const zips = files.filter(isZipFile);
+  if(files.length===1 && zips.length===1) return 'ZIP';
+  if(zips.length===0) return 'LEGACY DIRECT FILES';
+  return 'REVIEW';
+}
+
+let fileAuditRun = null; // { checked, total } while a run is in progress; null when idle
+
+async function runFileAudit(){
+  const targets = WB.listings.filter(l=>l.etsyListingId);
+  if(!targets.length) return { ok:false, message:'No listings with an Etsy listing ID to audit — import listings from Etsy first.' };
+  if(!etsyAuth || !etsyAuth.shopId) return { ok:false, message:'Not connected to Etsy.' };
+  fileAuditRun = { checked:0, total:targets.length };
+  renderFileAudit();
+  const bySku = {}; (WB.fileAudits||[]).forEach(a=>bySku[a.sku]=a);
+  const auditedAt = new Date().toISOString();
+  for(const l of targets){
+    let record;
+    try{
+      const res = await etsyFetch(`/application/shops/${etsyAuth.shopId}/listings/${l.etsyListingId}/files`);
+      if(!res.ok){
+        const t = await res.text();
+        record = {
+          sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
+          files: [], attachmentCount: 0, classification: 'ERROR',
+          error: `HTTP ${res.status}: ${t.slice(0,200)}`, auditedAt,
+        };
+      } else {
+        const data = await res.json();
+        const files = (data.results||[]).map(f=>({
+          filename: f.filename||'', filetype: f.filetype||'', sizeBytes: (f.size_bytes ?? null), filesize: f.filesize||'',
+        }));
+        record = {
+          sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
+          files, attachmentCount: files.length, classification: classifyListingFiles(files),
+          error: null, auditedAt,
+        };
+      }
+    }catch(e){
+      record = {
+        sku: l.sku, listingId: l.etsyListingId, listingTitle: l.oldTitle||'',
+        files: [], attachmentCount: 0, classification: 'ERROR', error: e.message, auditedAt,
+      };
+    }
+    bySku[l.sku] = record;
+    fileAuditRun.checked++;
+    // Read-only, but hundreds of listings shouldn't hammer Etsy's rate
+    // limit in a tight loop — a small stagger between calls.
+    await new Promise(r=>setTimeout(r, 150));
+  }
+  WB.fileAudits = Object.values(bySku);
+  WB.meta.lastFileAuditAt = auditedAt;
+  fileAuditRun = null;
+  await persistWorkbook();
+  renderFileAudit();
+  return { ok:true };
+}
+
+function fileAuditTotals(){
+  const rows = WB.fileAudits||[];
+  const t = { checked: rows.length, ZIP:0, 'LEGACY DIRECT FILES':0, 'NO FILES':0, REVIEW:0, ERROR:0 };
+  rows.forEach(r=>{ if(t[r.classification]!==undefined) t[r.classification]++; });
+  return t;
+}
+
+function fileAuditCsv(){
+  const header = ['SKU','Listing ID','Listing Title','Attachment Count','Classification','Filename','File Type','Size (bytes)','Audited At'];
+  const rows = [header];
+  (WB.fileAudits||[]).forEach(r=>{
+    if(!r.files.length){
+      rows.push([r.sku, r.listingId, r.listingTitle, r.attachmentCount, r.classification, r.error||'', '', '', r.auditedAt]);
+    } else {
+      r.files.forEach(f=>{
+        rows.push([r.sku, r.listingId, r.listingTitle, r.attachmentCount, r.classification, f.filename, f.filetype, f.sizeBytes, r.auditedAt]);
+      });
+    }
+  });
+  const escCsv = v => { const s=String(v??''); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  return rows.map(row=>row.map(escCsv).join(',')).join('\r\n');
+}
+
+function downloadTextFile(filename, text, mime){
+  const blob = new Blob([text], { type: mime||'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+function classificationColor(c){
+  if(c==='ZIP') return 'var(--green)';
+  if(c==='LEGACY DIRECT FILES') return 'var(--torch)';
+  if(c==='ERROR') return 'var(--red)';
+  if(c==='REVIEW') return 'var(--torch)';
+  return 'var(--smoke-dim)';
+}
+
+// ---------- PRICE ONLY ----------
+let priceOnlyState = null; // { listingId, sku, inventory, newPrice, currentPrice, blockers } — staged, not yet applied
+
+function priceOnlyBlockers(inventory){
+  const blockers = [];
+  const products = inventory.products||[];
+  if(products.length !== 1){
+    blockers.push(`This listing has ${products.length} products (variations) — Price Only can't safely guess how to reconstruct multi-product inventory. Blocked.`);
+  } else if((products[0].offerings||[]).length !== 1){
+    blockers.push(`This listing's product has ${(products[0].offerings||[]).length} offerings — Price Only only handles a single simple offering. Blocked.`);
+  }
+  return blockers;
+}
+
+async function stagePriceOnly(l, newPriceStr){
+  const newPrice = parseFloat(newPriceStr);
+  if(!l.etsyListingId) return { ok:false, message:'This listing has no Etsy listing ID.' };
+  if(!(newPrice > 0)) return { ok:false, message:'Enter a valid new price greater than $0.' };
+  if(!etsyAuth || !etsyAuth.accessToken) return { ok:false, message:'Not connected to Etsy.' };
+  let inventory;
+  try{
+    const res = await etsyFetch(`/application/listings/${l.etsyListingId}/inventory`);
+    if(!res.ok){
+      const t = await res.text();
+      return { ok:false, message:`Couldn't read the live listing inventory (HTTP ${res.status}): ${t.slice(0,300)}` };
+    }
+    inventory = await res.json();
+  }catch(e){
+    return { ok:false, message:'Couldn\'t reach Etsy: '+e.message };
+  }
+  const blockers = priceOnlyBlockers(inventory);
+  const product = (inventory.products||[])[0];
+  const offering = product ? (product.offerings||[])[0] : null;
+  const currentPrice = offering ? (offering.price.amount / offering.price.divisor) : null;
+  priceOnlyState = { listingId: l.etsyListingId, sku: l.sku, inventory, newPrice, currentPrice, blockers };
+  return { ok:true, blocked: blockers.length>0 };
+}
+
+async function applyPriceOnly(){
+  if(!priceOnlyState || priceOnlyState.blockers.length) return { ok:false, message:'Nothing staged, or this listing is blocked.' };
+  const { listingId, sku, inventory, newPrice, currentPrice } = priceOnlyState;
+  const product = inventory.products[0];
+  const offering = product.offerings[0];
+
+  // Rebuild the PUT body from exactly what Etsy just returned. Every field
+  // that isn't the price is carried over unchanged — sku, property_values,
+  // quantity, is_enabled, readiness_state_id — so the only thing that can
+  // possibly change on Etsy's side is the price.
+  const body = {
+    products: [{
+      sku: product.sku,
+      property_values: (product.property_values||[]).map(pv=>({
+        property_id: pv.property_id, property_name: pv.property_name,
+        scale_id: pv.scale_id, value_ids: pv.value_ids, values: pv.values,
+      })),
+      offerings: [{
+        price: newPrice,
+        quantity: offering.quantity,
+        is_enabled: offering.is_enabled,
+        readiness_state_id: offering.readiness_state_id,
+      }],
+    }],
+    price_on_property: inventory.price_on_property||[],
+    quantity_on_property: inventory.quantity_on_property||[],
+    sku_on_property: inventory.sku_on_property||[],
+    readiness_state_on_property: inventory.readiness_state_on_property||null,
+  };
+
+  const requestedAt = new Date().toISOString();
+  let logEntry = { sku, listingId, oldPrice: currentPrice, newPrice, requestedAt, verified:false, message:'' };
+  try{
+    const res = await etsyFetch(`/application/listings/${listingId}/inventory`, {
+      method:'PUT', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body),
+    });
+    if(!res.ok){
+      const t = await res.text();
+      logEntry.message = `Etsy rejected the price update (HTTP ${res.status}): ${t.slice(0,300)}`;
+      WB.priceHistory.push(logEntry); await persistWorkbook();
+      priceOnlyState = null;
+      return { ok:false, message: logEntry.message };
+    }
+  }catch(e){
+    logEntry.message = 'Price update failed: '+e.message;
+    WB.priceHistory.push(logEntry); await persistWorkbook();
+    priceOnlyState = null;
+    return { ok:false, message: logEntry.message };
+  }
+
+  // Never trust the write response as proof — read the listing back fresh
+  // and only call this a success if Etsy's own live price now matches
+  // exactly what was requested.
+  let verifiedPrice = null;
+  try{
+    const res2 = await etsyFetch(`/application/listings/${listingId}/inventory`);
+    if(res2.ok){
+      const data2 = await res2.json();
+      const off2 = data2.products && data2.products[0] && data2.products[0].offerings && data2.products[0].offerings[0];
+      if(off2) verifiedPrice = off2.price.amount / off2.price.divisor;
+    }
+  }catch(e){ /* verification fetch failed — verified stays false below */ }
+
+  const verified = verifiedPrice !== null && Math.abs(verifiedPrice - newPrice) < 0.005;
+  logEntry.verified = verified;
+  logEntry.message = verified
+    ? `Verified: Etsy now shows $${verifiedPrice.toFixed(2)}.`
+    : `NOT verified — Etsy's read-back price was ${verifiedPrice===null?'unreadable':'$'+verifiedPrice.toFixed(2)}, not $${newPrice.toFixed(2)}. Check this listing manually on Etsy.`;
+  WB.priceHistory.push(logEntry);
+
+  // Only touch the local mirror of price once the change is verified —
+  // never write a number into the workbook that Etsy hasn't confirmed.
+  if(verified){
+    const l = WB.listings.find(x=>x.sku===sku);
+    if(l) l.price = verifiedPrice.toFixed(2);
+  }
+  await persistWorkbook();
+  priceOnlyState = null;
+  return { ok:verified, message: logEntry.message };
+}
+
+function renderFileAudit(){
+  const totals = fileAuditTotals();
+  let html = `<div class="section-title"><span class="left">File Audit</span></div>
+  <div class="banner ok"><span class="mono">READ-ONLY</span><span class="fill">Reads Etsy's currently attached digital files for every tracked listing. Never uploads, deletes, renames, or replaces anything.</span></div>
+  <div class="section-note">Checks every listing that has an Etsy listing ID (${WB.listings.filter(l=>l.etsyListingId).length} right now). ZIP = exactly one zip file attached. Legacy direct files = one or more loose files with no zip — these are REBUILD LAST for cleanup. No files = nothing attached. Review = a mixed or ambiguous package. Error = Etsy couldn't be read for that listing.</div>`;
+
+  html += `<div class="save-bar" style="border-top:none; padding-top:0;">
+    <button class="btn primary" id="runFileAuditBtn" ${fileAuditRun?'disabled':''}>${fileAuditRun?`Auditing… (${fileAuditRun.checked}/${fileAuditRun.total})`:'Run File Audit'}</button>
+    <button class="btn" id="exportFileAuditBtn" ${(WB.fileAudits||[]).length?'':'disabled'}>Export CSV</button>
+  </div>`;
+
+  if((WB.fileAudits||[]).length){
+    html += `<div class="card" style="max-width:760px; margin-bottom:16px; display:flex; gap:20px; flex-wrap:wrap;">
+      <div><b style="font-size:20px;">${totals.checked}</b><div class="section-note" style="margin:0;">checked</div></div>
+      <div><b style="font-size:20px; color:var(--green);">${totals.ZIP}</b><div class="section-note" style="margin:0;">ZIP</div></div>
+      <div><b style="font-size:20px; color:var(--torch);">${totals['LEGACY DIRECT FILES']}</b><div class="section-note" style="margin:0;">legacy / rebuild last</div></div>
+      <div><b style="font-size:20px;">${totals['NO FILES']}</b><div class="section-note" style="margin:0;">no files</div></div>
+      <div><b style="font-size:20px;">${totals.REVIEW}</b><div class="section-note" style="margin:0;">review</div></div>
+      <div><b style="font-size:20px; color:var(--red);">${totals.ERROR}</b><div class="section-note" style="margin:0;">errors</div></div>
+    </div>
+    <div class="section-note">Last run: ${WB.meta.lastFileAuditAt ? new Date(WB.meta.lastFileAuditAt).toLocaleString() : 'never'}</div>
+    <div class="card-scroll" style="max-height:420px; margin-bottom:24px;"><table class="simple-table">
+      <thead><tr><th>SKU</th><th>Listing</th><th>Attachments</th><th>Files</th><th>Classification</th></tr></thead>
+      <tbody>${(WB.fileAudits||[]).slice().sort((a,b)=>(a.sku||'').localeCompare(b.sku||'')).map(r=>`<tr>
+        <td class="small">${escapeHtml(r.sku)}</td>
+        <td>${escapeHtml(r.listingTitle||'')} <span class="section-note" style="margin:0;">#${r.listingId}</span></td>
+        <td class="small">${r.attachmentCount}</td>
+        <td class="small">${escapeHtml((r.files||[]).map(f=>f.filename).join(', ') || (r.error||''))}</td>
+        <td class="small"><b style="color:${classificationColor(r.classification)}">${r.classification}</b></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  } else {
+    html += `<div class="empty-hint">No audit run yet — click "Run File Audit" above.</div>`;
+  }
+
+  html += `<div class="section-title" style="margin-top:30px;"><span class="left">Price Only</span></div>
+  <div class="banner err"><span class="mono">WRITE</span><span class="fill">Changes ONE listing's price on Etsy and nothing else. Does not use the project push — does not touch title, tags, description, SKU, files, images, quantity, or any pending Workbench edits.</span></div>
+  <div class="card" style="max-width:520px; margin-bottom:16px;">
+    <div class="field"><label>Listing</label>
+      <select id="priceOnlyListingSelect">
+        <option value="">Select a listing…</option>
+        ${WB.listings.filter(l=>l.etsyListingId).slice().sort((a,b)=>(a.sku||'').localeCompare(b.sku||'')).map(l=>`<option value="${escapeHtml(l.sku)}">${escapeHtml(l.sku)} — ${escapeHtml(l.oldTitle||'')}</option>`).join('')}
+      </select></div>
+    <div class="field" style="margin-bottom:0;"><label>New price (USD)</label>
+      <input type="number" id="priceOnlyNewPrice" step="0.01" min="0.01" placeholder="e.g. 4.99"/></div>
+    <div class="save-bar"><button class="btn" id="priceOnlyCheckBtn">Fetch live price &amp; check</button></div>
+  </div>`;
+
+  if(priceOnlyState){
+    if(priceOnlyState.blockers.length){
+      html += `<div class="banner err"><span class="mono">⛔</span><span class="fill"><b>Blocked.</b> ${priceOnlyState.blockers.map(escapeHtml).join(' ')}</span></div>`;
+    } else {
+      html += `<div class="card" style="max-width:520px; border-left:4px solid var(--torch);">
+        <div style="font-size:15px; font-weight:800; color:var(--ink); margin-bottom:8px;">Confirm price change — SKU ${escapeHtml(priceOnlyState.sku)}</div>
+        <div style="font-size:18px; font-family:'IBM Plex Mono',monospace; margin-bottom:10px;">$${priceOnlyState.currentPrice!=null?priceOnlyState.currentPrice.toFixed(2):'?'} &rarr; $${priceOnlyState.newPrice.toFixed(2)}</div>
+        <div class="section-note">This writes <b>only the price</b>. Title, tags, description, SKU, files, images, quantity, and any pending Workbench edits are NOT being pushed. Etsy's live inventory structure is preserved exactly as-is otherwise.</div>
+        <div class="save-bar"><button class="btn danger" id="priceOnlyApplyBtn">Apply price change on Etsy</button>
+        <button class="btn" id="priceOnlyCancelBtn">Cancel</button></div>
+      </div>`;
+    }
+  }
+
+  if((WB.priceHistory||[]).length){
+    html += `<div class="section-title" style="margin-top:20px;"><span class="left">Price Only history</span></div>
+    <div class="card-scroll" style="max-height:280px;"><table class="simple-table">
+      <thead><tr><th>SKU</th><th>Old &rarr; New</th><th>Verified</th><th>When</th><th>Note</th></tr></thead>
+      <tbody>${(WB.priceHistory||[]).slice().reverse().map(h=>`<tr>
+        <td class="small">${escapeHtml(h.sku)}</td>
+        <td class="small">$${h.oldPrice!=null?Number(h.oldPrice).toFixed(2):'?'} &rarr; $${Number(h.newPrice).toFixed(2)}</td>
+        <td class="small">${h.verified?'<b style="color:var(--green)">yes</b>':'<b style="color:var(--red)">no</b>'}</td>
+        <td class="small">${new Date(h.requestedAt).toLocaleString()}</td>
+        <td class="small">${escapeHtml(h.message||'')}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  }
+
+  document.getElementById('content').innerHTML = html;
+
+  const runBtn = document.getElementById('runFileAuditBtn');
+  if(runBtn) runBtn.addEventListener('click', ()=> runFileAudit());
+  const exportBtn = document.getElementById('exportFileAuditBtn');
+  if(exportBtn) exportBtn.addEventListener('click', ()=> downloadTextFile(`file-audit-${todayISO}.csv`, fileAuditCsv(), 'text/csv'));
+
+  const checkBtn = document.getElementById('priceOnlyCheckBtn');
+  if(checkBtn) checkBtn.addEventListener('click', async ()=>{
+    const sku = document.getElementById('priceOnlyListingSelect').value;
+    const newPriceStr = document.getElementById('priceOnlyNewPrice').value;
+    const l = WB.listings.find(x=>x.sku===sku);
+    if(!l){ alert('Pick a listing first.'); return; }
+    checkBtn.disabled = true; checkBtn.textContent = 'Checking…';
+    const r = await stagePriceOnly(l, newPriceStr);
+    checkBtn.disabled = false; checkBtn.textContent = 'Fetch live price & check';
+    if(!r.ok){ alert(r.message); return; }
+    renderFileAudit();
+  });
+  const applyBtn = document.getElementById('priceOnlyApplyBtn');
+  if(applyBtn) applyBtn.addEventListener('click', async ()=>{
+    if(!priceOnlyState) return;
+    if(!confirm(`Change the LIVE Etsy price for SKU ${priceOnlyState.sku} from $${priceOnlyState.currentPrice!=null?priceOnlyState.currentPrice.toFixed(2):'?'} to $${priceOnlyState.newPrice.toFixed(2)}?\n\nOnly the price is written. Nothing else on this listing is touched.`)) return;
+    applyBtn.disabled = true; applyBtn.textContent = 'Applying…';
+    const r = await applyPriceOnly();
+    renderFileAudit();
+    alert(r.message);
+  });
+  const cancelBtn = document.getElementById('priceOnlyCancelBtn');
+  if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ priceOnlyState = null; renderFileAudit(); });
+}
+
 
 // ============================================================
 // ACCOUNT + CLOUD SYNC
@@ -7254,6 +7614,7 @@ function render(){
   else if(uiState.lastTab==='completion') renderCompletion();
   else if(uiState.lastTab==='attention') renderAttention();
   else if(uiState.lastTab==='stats') renderStats();
+  else if(uiState.lastTab==='fileAudit') renderFileAudit();
   else if(uiState.lastTab==='playbook') renderPlaybook();
   else if(uiState.lastTab==='etsy') renderEtsy();
   else if(uiState.lastTab==='account') renderAccount();
