@@ -7371,6 +7371,11 @@ async function stageBulkPrice(csvText){
   if(headerError) return { ok:false, message: headerError };
   if(!parsed.length && !errors.length) return { ok:false, message:'No data rows found.' };
   if(!etsyAuth || !etsyAuth.accessToken) return { ok:false, message:'Not connected to Etsy.' };
+  // Check this BEFORE spending potentially minutes fetching every row's live
+  // price — the push button never appears without a confirmation word set
+  // (Rules & Playbook tab), and that word is per-browser-origin, so a
+  // confirmation word set on production does NOT carry over to this preview.
+  if(!WB.meta.pushPassword) return { ok:false, message:'No confirmation word set on THIS origin yet — go to Rules & Playbook and set one first. (This is separate from production’s word, if you’ve set one there: the preview is a different site with its own storage.) Nothing was checked yet.' };
 
   const rows = errors.map(e=>({ status:'error', message:e.reason, raw:e.raw, selected:false }));
   bulkPriceState = { rows, stagedAt: null };
