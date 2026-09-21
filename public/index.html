@@ -6838,6 +6838,30 @@ async function importFromEtsy(silent){
 
 function renderEtsy(){
   let html = '';
+
+  // ============================================================
+  // TEMPORARY DIAGNOSTIC — PREVIEW ONLY. Remove before merging to
+  // production. Read-only: reports state, writes nothing, changes no
+  // authentication behavior, and never displays a token/secret — only
+  // whether one is present.
+  // ============================================================
+  if(window.location.hostname !== 'soft-hall-7798.kismetdesignfab.workers.dev'){
+    const diagProfile = currentProfile();
+    const diagHasEtsyAuth = !!(etsyAuth && etsyAuth.accessToken);
+    html += `<div class="card" style="max-width:640px; margin-bottom:20px; border:2px dashed var(--torch);">
+      <div style="font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:0.5px; color:var(--torch); font-weight:700; margin-bottom:10px;">TEMPORARY DIAGNOSTIC — PREVIEW ONLY</div>
+      <table class="simple-table" style="margin:0;"><tbody>
+        <tr><td class="small">Origin</td><td class="small">${escapeHtml(window.location.origin)}</td></tr>
+        <tr><td class="small">Active profile</td><td class="small">${escapeHtml(diagProfile ? diagProfile.label : '(none)')} <span class="section-note" style="margin:0;">(${escapeHtml(diagProfile ? diagProfile.id : '')})</span></td></tr>
+        <tr><td class="small">Etsy auth stored?</td><td class="small"><b>${diagHasEtsyAuth ? 'true' : 'false'}</b></td></tr>
+        <tr><td class="small">Etsy shopId</td><td class="small">${escapeHtml(etsyAuth && etsyAuth.shopId ? String(etsyAuth.shopId) : '(none)')}</td></tr>
+        <tr><td class="small">Etsy shopName</td><td class="small">${escapeHtml(etsyAuth && etsyAuth.shopName ? etsyAuth.shopName : '(none)')}</td></tr>
+        <tr><td class="small">Listings loaded</td><td class="small">${WB.listings.length}</td></tr>
+        <tr><td class="small">ETSY_REDIRECT_URI</td><td class="small">${escapeHtml(ETSY_REDIRECT_URI)}</td></tr>
+      </tbody></table>
+    </div>`;
+  }
+
   if(etsyAuth && etsyAuth.error){
     html += `<div class="banner err"><span class="mono">⚠</span><span class="fill">${escapeHtml(etsyAuth.error)}</span><button id="etsyRetryBtn">Try again</button></div>`;
   }
