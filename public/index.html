@@ -5568,57 +5568,67 @@ async function gmailFetch(path, opts={}){
   });
 }
 
-// Read-only search, scoped to Etsy's own sale-notification senders. Etsy
-// sends "you made a sale" mail from these addresses; a customer's own
-// purchase confirmations (buying FROM other shops) come from the same
-// domain but different templates/subjects, so the query also excludes the
-// subject lines Etsy uses for a PURCHASE (their word for something this
-// account bought, not sold) to keep this to sales only.
-const GMAIL_SALE_QUERY = '(from:transaction@etsy.com OR from:noreply@etsy.com OR from:etsy.com) ' +
-  '(subject:"you made a sale" OR subject:"you have a new order" OR subject:"ka-ching" OR subject:"Item(s) purchased") ' +
-  '-subject:"order confirmation" -subject:"you purchased" -subject:"receipt for your Etsy purchase"';
+// Read-only search, scoped to the sender Etsy actually sends order mail
+// from. Confirmed against 62 real emails in this shop's inbox: every sale
+// AND every purchase confirmation shares one subject format ("Etsy Order
+// confirmation for: $X from: Y (orderNumber)") and one sender
+// (transaction@etsy.com) — sale vs. purchase is NOT distinguishable from
+// the subject or sender, so the query can't filter it. Disambiguation
+// happens in parseEtsySaleEmail() below, from the body's "Shop:" line.
+const GMAIL_SALE_QUERY = 'from:transaction@etsy.com subject:"Order confirmation"';
 
 // ---------- PARSING ----------
-// Best-effort against Etsy's known sale-notification format. NOT validated
-// against a real sample from this shop — Gmail access wasn't available
-// while this was built (see the session's blocker report). Treat matches
-// as provisional; re-check these patterns against real emails before
-// trusting the numbers it produces.
+// Validated against 62 real "Order confirmation" emails from this shop's
+// Gmail (2026-07-23 through 2026-09-21), covering both body templates in
+// use ("Congratulations on your Etsy order..." and the older "We've
+// finished processing your Etsy sale...") and multi-item orders. Neither
+// template ever includes a SKU or an Etsy listing URL/ID — Product Master
+// matching for these emails happens via exact title match only.
 function parseEtsySaleEmail(subject, bodyText, headerDate){
   const text = bodyText || '';
-  const orderMatch = text.match(/order\s*#\s*(\d{6,})/i) || text.match(/order\s*(?:number|id)[:\s]+(\d{6,})/i);
-  const etsyOrderNumber = orderMatch ? orderMatch[1] : null;
-  const orderTotalMatch = text.match(/order\s*total[:\s]*\$?([\d,]+\.\d{2})/i);
+
+  // Etsy sends this exact template both when the shop SOLD something and
+  // when this account BOUGHT something from another shop — the only body
+  // difference is the "Shop:" line: this shop's own name for a sale, the
+  // other seller's name for a purchase. Compare against the connected
+  // shop's own name (from Etsy OAuth) rather than hardcoding a shop name.
+  const shopMatch = text.match(/Shop:\s*([^\n]+)/);
+  const shopName = shopMatch ? shopMatch[1].trim() : null;
+  const ownShopName = (typeof etsyAuth!=='undefined' && etsyAuth && etsyAuth.shopName) ? etsyAuth.shopName.trim() : null;
+  const isOwnSale = !!(shopName && ownShopName && shopName.toLowerCase() === ownShopName.toLowerCase());
+
+  // The subject carries the order number in parentheses at the end; the
+  // body's "order number is N" wording varies by template and is the
+  // fallback only.
+  const subjOrderMatch = (subject||'').match(/\((\d{6,})\)\s*$/);
+  const bodyOrderMatch = text.match(/order\s*number\s*is[:\s]*(\d{6,})/i) || text.match(/orders\/(\d{6,})/i);
+  const etsyOrderNumber = (subjOrderMatch && subjOrderMatch[1]) || (bodyOrderMatch && bodyOrderMatch[1]) || null;
+
+  const orderTotalMatch = text.match(/Order\s*Total:\s*\$?([\d,]+\.\d{2})/i);
   const orderTotal = orderTotalMatch ? parseFloat(orderTotalMatch[1].replace(/,/g,'')) : null;
 
-  // One order email can list several line items. Etsy's plain-text layout
-  // repeats a block per item; a block only counts as an item if it carries
-  // a quantity or a dollar amount, so unrelated paragraphs (greeting,
-  // footer, shipping address) don't get parsed as phantom items. Order
-  // total / subtotal / shipping / tax lines also carry a dollar amount but
-  // are never an item — excluded explicitly rather than relying on the
-  // qty/price check alone to filter them out.
-  const NON_ITEM_BLOCK = /^(order\s*total|sub\s*total|shipping|tax|discount|sales\s*tax|grand\s*total|item\s*total)/i;
-  const blocks = text.split(/\n\s*\n/).map(b=>b.trim()).filter(Boolean);
+  // Both templates repeat an identical "Order Details" block per item:
+  // Transaction ID / Item / [optional Personalization line] / Quantity /
+  // Item price — with no blank line between items in a multi-item order,
+  // so this can't be split on blank lines. The non-greedy "any line that
+  // isn't Quantity:" clause tolerates the optional Personalization line
+  // (and anything else Etsy might insert there) between Item and Quantity.
   const items = [];
-  for(const block of blocks){
-    if(NON_ITEM_BLOCK.test(block)) continue;
-    const qtyMatch = block.match(/qty[:\s]+(\d+)/i) || block.match(/quantity[:\s]+(\d+)/i);
-    const priceMatch = block.match(/\$([\d,]+\.\d{2})/);
-    if(!qtyMatch && !priceMatch) continue;
-    const listingUrlMatch = block.match(/etsy\.com\/listing\/(\d+)/i);
-    const listingIdMatch = listingUrlMatch || block.match(/listing[_\s]?id[:\s]+(\d+)/i);
+  const itemBlockRe = /Item:\s*([^\n]+)\n(?:(?!Quantity:)[^\n]*\n)*Quantity:\s*(\d+)\nItem price:\s*\$?([\d,]+\.\d{2})/gi;
+  let m;
+  while((m = itemBlockRe.exec(text))){
+    const block = m[0];
     const skuMatch = block.match(/sku[:\s]+([A-Za-z0-9\-_.]+)/i);
-    const titleLine = block.split('\n').find(l=>l.trim() && !/^(qty|quantity|sku|\$)/i.test(l.trim()));
+    const listingUrlMatch = block.match(/etsy\.com\/listing\/(\d+)/i);
     items.push({
-      listingTitle: titleLine ? titleLine.trim().slice(0,200) : null,
+      listingTitle: m[1].trim().slice(0,200),
       sku: skuMatch ? skuMatch[1].trim() : null,
-      etsyListingId: listingIdMatch ? listingIdMatch[1] : null,
-      quantity: qtyMatch ? parseInt(qtyMatch[1],10) : 1,
-      itemPrice: priceMatch ? parseFloat(priceMatch[1].replace(/,/g,'')) : null,
+      etsyListingId: listingUrlMatch ? listingUrlMatch[1] : null,
+      quantity: parseInt(m[2],10),
+      itemPrice: parseFloat(m[3].replace(/,/g,'')),
     });
   }
-  return { etsyOrderNumber, items, orderTotal, saleAt: headerDate || null };
+  return { etsyOrderNumber, items, orderTotal, saleAt: headerDate || null, isOwnSale, shopName };
 }
 
 // ---------- PRODUCT MASTER MATCHING ----------
@@ -5718,6 +5728,9 @@ function existingSaleIds(){ return new Set((WB.sales||[]).map(s=>s.id)); }
 
 function buildSaleRecordsFromEmail(gmailMessageId, subject, bodyText, headerDate, cohortMap){
   const parsed = parseEtsySaleEmail(subject, bodyText, headerDate);
+  // A purchase THIS account made from another shop reuses Etsy's exact
+  // sale-confirmation template — never import it as a sale.
+  if(!parsed.isOwnSale) return [];
   return parsed.items.map((item, idx)=>{
     const match = matchSaleToProductMaster(item);
     const sale = {
