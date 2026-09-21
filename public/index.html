@@ -7308,7 +7308,11 @@ function parseSimpleCsv(text){
 }
 
 function findHeaderIndex(headerRow, aliases){
-  const norm = headerRow.map(h=>h.trim().toLowerCase());
+  // Pasted/exported CSV headers routinely carry stray whitespace mid-label
+  // (a tab where a space should be is common from spreadsheet copy-paste) —
+  // collapse every run of whitespace to one space, not just the ends, so
+  // "New\tPrice" still matches "New Price".
+  const norm = headerRow.map(h=>h.trim().toLowerCase().replace(/\s+/g,' '));
   for(const alias of aliases){
     const idx = norm.indexOf(alias);
     if(idx !== -1) return idx;
