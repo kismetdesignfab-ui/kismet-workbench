@@ -928,12 +928,12 @@ function seedWorkbook(){
   return {
     meta: {
       source: 'SAMPLE DATA (Kismet\'s Aug 24, 2026 workbook — for demo purposes only)',
-      importedAt: null,
+      importedAt: null, descriptionPlaybookVersion: DESCRIPTION_PLAYBOOK_VERSION,
       activeProjectId: null,
       socialPlatform: 'Facebook', socialPlatformOther: '',
       infographicEnabled: true, infographicLabel: 'Infographic',
-      targetBuyer: 'Makers, CNC plasma and laser operators, fabricators and sign shops buying digital cut files',
-      notTargetBuyer: 'Finished-sign shoppers, farmhouse-decor shoppers, gift buyers',
+      targetBuyer: KISMET_TARGET_BUYER,
+      notTargetBuyer: KISMET_NOT_TARGET_BUYER,
       disabledCheckTypes: [], pushPassword: '',
     },
     listings: listings,
@@ -978,6 +978,45 @@ function seedWorkbook(){
 // keeping those out means a bug here can't cost money or take a
 // listing down.
 // ============================================================
+// ============================================================
+// DESCRIPTION RULES — shared by both rule sets below so they can't drift.
+// Written to Etsy's own description guidance (Seller Handbook): the first
+// sentence says plainly what the item is, using the words a buyer would
+// search, because Etsy and Google show it as the preview; key details
+// come early, in short scannable lines; no keyword stuffing. Audience is
+// CNC shops, not hobby crafters — plain shop-floor language, no fluff.
+// ============================================================
+const KISMET_TARGET_BUYER = 'CNC shops — plasma, laser, router and waterjet operators, fabrication shops and sign shops buying production-ready digital cut files';
+const KISMET_NOT_TARGET_BUYER = 'Hobby crafters, Cricut/vinyl makers, finished-sign shoppers, farmhouse-decor shoppers, gift buyers';
+const KISMET_DESCRIPTION_RULES_BODY = `Follow Etsy's description guidance: the first sentence is the preview Etsy and Google show, so it must say plainly what this is. Put the details a buyer needs up front, keep lines short and scannable, and never repeat keywords to game search.
+
+Reader: a CNC shop owner or operator deciding whether this file will cut clean on their machine. Write the way one shop talks to another — direct, specific, no sales talk.
+
+WHAT THE AI WRITES (two short pieces only):
+1. Opening — ONE sentence, ideally under 160 characters. Name the design as the title does (primary phrase first) and say it is a digital cut file in the formats actually included. Example: "Beagle welcome sign cut file in DXF and SVG for CNC plasma and laser cutting."
+2. Design and use — ONE or TWO sentences built only from what the photos and listing actually show: what the piece is, visible text or elements, how it is laid out (one piece, frame and insert, stake, hanger, monogram with a name area), and what a shop would realistically cut it for. Use shop terms — plasma, laser, router, sheet, plate, parts — only where accurate.
+
+The fixed blocks (digital-download notice, files included, size/kerf, compatibility, download, returns, license) come from saved shop settings — never restate them in the AI text.
+
+FILE TYPES: list exactly the formats in the listing's digital files. When those files are a ZIP or can't be read, use the formats printed on the listing's own infographic photos. If neither source shows a format, leave it out.
+
+PHOTOS: read every listing photo, not just the first. The artwork photo sets the subject; infographic/spec photos supply formats, size and layout details. A photo shows what the design looks like — it is not proof of materials, thickness or machine compatibility.
+
+CUT FLUFF — never write:
+- Greetings or shop intros ("Welcome to…", "Thanks for stopping by").
+- Hype and filler: perfect, amazing, stunning, unique, beautiful, high quality, must-have, elevate, add a touch of, bring your project to life, look no further, whether you're…
+- Crafter framing: DIY, craft project, hobby, "makers", "your next creation", Cricut, vinyl, scrapbooking — unless the file genuinely targets that use.
+- Gift, occasion or decor pitches the artwork does not support.
+- The same fact twice. Say "digital download, no physical item ships" once.
+- Keyword lists or the title repeated as a sentence.
+
+PLAIN PHRASING: short declarative sentences; active voice; one idea per sentence; no stacked adjectives; no em-dash chains; no exclamation points. If a sentence would read oddly out loud to a shop owner, rewrite it.`;
+const KISMET_DESCRIPTION_RULES_MD = `## DESCRIPTION\n\n${KISMET_DESCRIPTION_RULES_BODY}`;
+const KISMET_DESCRIPTION_RULES_PLAIN = `DESCRIPTION\n${KISMET_DESCRIPTION_RULES_BODY}`;
+// Bumped whenever the default description rules/template change enough
+// that saved shops should be moved onto them (see loadState migration).
+const DESCRIPTION_PLAYBOOK_VERSION = 2;
+
 // The reviewed, corrected v1-draft content — pre-filled as a starting
 // point, editable in Playbook. Not the same text as KISMET_AI_RULES (the
 // live Claude /draft rules) — this is a separate, versioned set used only
@@ -986,7 +1025,7 @@ const SEO_INSTRUCTIONS_V1_DRAFT_DEFAULT = `GOVERNING RULE: Accuracy beats keywor
 
 RELEVANCE BEATS VOLUME: A high-search or high-conversion phrase is useless if it attracts the wrong buyer or describes something the listing does not contain. High conversion never rescues a bad match.
 
-TARGET BUYER: Makers, CNC plasma and laser operators, fabricators, and sign shops buying digital cut files. NOT finished-sign shoppers, farmhouse-decor shoppers, or gift buyers. No physical item is sold. Every word chosen must speak to someone who will cut this file themselves.
+TARGET BUYER: CNC shops — plasma, laser, router and waterjet operators, fabrication shops and sign shops buying production-ready digital cut files. NOT hobby crafters, Cricut/vinyl makers, finished-sign shoppers, farmhouse-decor shoppers, or gift buyers. No physical item is sold. Every word chosen must speak to a shop that will load this file into CAM/nesting software and cut it.
 
 ## TITLE
 
@@ -1029,22 +1068,7 @@ REJECT A TAG IMMEDIATELY IF:
 - One of several tags wasting slots on functionally identical variations without expanding real search coverage.
 - Depends on an assumption not checked against the artwork or the actual file package.
 
-## DESCRIPTION
-
-Required opening line, exact: "Welcome to Kismet Cut Ready DXF — cut-ready artwork for CNC plasma and laser."
-
-Then identify the specific design and what the buyer can make with it, primary keyword early and natural — not a tag list. Then, in order:
-1. DIGITAL DOWNLOAD stated clearly — no physical product ships
-2. What the design is / intended use
-3. File types actually included (only what's really in this listing — never assumed)
-4. Cut-ready facts: clean/closed/joined paths, proper spacing
-5. Size, .051" kerf, scaling limitations when true
-6. Personalization or special construction details if applicable
-7. Compatibility note — buyer verifies the format works with their own machine/software
-8. Download information
-9. Digital-product return policy + contact through Etsy Messages for file problems
-10. License: buyer may make finished items, may not resell/share/redistribute the files
-11. Final reminder: no physical product included
+${KISMET_DESCRIPTION_RULES_MD}
 
 ## NON-NEGOTIABLE
 
@@ -1094,22 +1118,27 @@ function defaultDescriptionTemplates(){
   const mk = (key, name, appliesTo, status, order, defaultText, requiredFields) =>
     ({ key, name, appliesTo, status, order, defaultText: defaultText||'', requiredFields: requiredFields||[] });
   return {
+    // Digital: order follows Etsy's guidance — what it is first, then the
+    // facts a CNC shop checks before buying, then policy. Each fact is said
+    // once: the old greeting line, the second and third "no physical
+    // product" lines and the separate contact line were repetition, so
+    // they now default to disabled rather than being deleted.
     digital: [
-      mk('shopOpening','Shop opening','digital','required',1,'Welcome to Kismet Cut Ready DXF — cut-ready artwork for CNC plasma and laser.'),
-      mk('introAI','Listing-specific design introduction','digital','required',2,'(AI-written from verified facts — not editable as static text)'),
-      mk('digitalWarning','Digital-download warning','digital','required',3,'DIGITAL DOWNLOAD — no physical product will be shipped.'),
-      mk('useAI','Intended use','digital','required',4,'(AI-written from verified facts — not editable as static text)'),
-      mk('includedFormats','Included formats','digital','required',5,'', ['formats']),
-      mk('cutReadyInfo','Cut-ready/construction information','digital','optional',6,''),
-      mk('sizeKerfScaling','Size, kerf and scaling information','digital','optional',7,'', ['dimensions','kerf']),
+      mk('shopOpening','Shop opening','digital','disabled',1,''),
+      mk('introAI','Opening sentence (what it is)','digital','required',2,'(AI-written from verified facts — not editable as static text)'),
+      mk('digitalWarning','Digital-download notice','digital','required',3,'Digital download. No physical item ships.'),
+      mk('useAI','Design and use','digital','required',4,'(AI-written from verified facts — not editable as static text)'),
+      mk('includedFormats','Files included','digital','required',5,'', ['formats']),
+      mk('sizeKerfScaling','Size, kerf and scaling','digital','optional',6,'', ['dimensions','kerf']),
+      mk('cutReadyInfo','Cut-ready details','digital','optional',7,''),
       mk('personalization','Personalization','digital','optional',8,'', ['personalization']),
-      mk('compatibility','Compatibility responsibility','digital','required',9,'Please verify before purchasing that the included file formats are compatible with your machine and software.'),
-      mk('downloadInstructions','Download instructions','digital','optional',10,'After Etsy processes your payment, the files will be available through your Etsy account.'),
-      mk('digitalReturnWarning','Digital refund/cancellation warning','digital','required',11,'Because this is a downloadable digital product, returns, exchanges and cancellations are not accepted. If you experience a problem with the files, please contact us through Etsy Messages so we can help.'),
-      mk('license','File license','digital','required',12,'You may use these files to create finished physical products. You may not resell, share, copy, redistribute or otherwise provide the digital files to another person or business.'),
+      mk('compatibility','Compatibility','digital','required',9,'Confirm these formats open in your CAM or nesting software before you buy.'),
+      mk('downloadInstructions','Download','digital','optional',10,'Files are available from your Etsy Purchases page once payment clears.'),
+      mk('digitalReturnWarning','Returns','digital','required',11,'Digital files can\u2019t be returned, exchanged or cancelled. If a file won\u2019t open or cut correctly, message us on Etsy and we\u2019ll help.'),
+      mk('license','License','digital','required',12,'You may cut and sell finished pieces made from these files. You may not resell, share or redistribute the files.'),
       mk('fileResalePermission','File-resale prohibition','digital','disabled',13,''),
-      mk('finalNoPhysical','Final no-physical-product warning','digital','required',14,'No physical product is included with this purchase.'),
-      mk('contactInstructions','Contact instructions','digital','optional',15,'Questions? Reach out through Etsy Messages.'),
+      mk('finalNoPhysical','Final no-physical-product warning','digital','disabled',14,'No physical product is included with this purchase.'),
+      mk('contactInstructions','Contact instructions','digital','disabled',15,'Questions? Reach out through Etsy Messages.'),
     ],
     physical: [
       mk('shopOpening','Shop opening','physical','required',1,''),
@@ -1137,6 +1166,24 @@ const DEFAULT_AVAILABLE_FORMATS = ['DXF','DWG','SVG','PNG','JPG','AI','EPS','PDF
 // Built-in formats plus anything this shop added. Built-ins can be
 // unchecked but never deleted, so they stay available if the shop starts
 // offering them later; custom entries can be removed outright.
+// Display order for formats in a description: CAD/cut formats a CNC shop
+// loads first, then vector, then raster/print. Unknown extras keep their
+// original order at the end.
+const FORMAT_DISPLAY_ORDER = ['DXF','DWG','SVG','AI','EPS','PDF','PNG','JPG'];
+function orderFormats(list){
+  const uniq = Array.from(new Set((list||[]).map(f=>String(f).toUpperCase().trim()).filter(Boolean)));
+  const rank = f=>{ const i = FORMAT_DISPLAY_ORDER.indexOf(f); return i<0 ? 99 : i; };
+  return uniq.map((f,i)=>({f,i})).sort((a,b)=>rank(a.f)-rank(b.f) || a.i-b.i).map(x=>x.f);
+}
+// File extension -> format name as it's written in a listing. Only used to
+// read the listing's actual digital files, which are the real proof of
+// what a buyer receives (photos only claim it).
+const FILE_EXT_FORMATS = { dxf:'DXF', dwg:'DWG', svg:'SVG', png:'PNG', jpg:'JPG', jpeg:'JPG', ai:'AI', eps:'EPS', pdf:'PDF' };
+const ARCHIVE_EXTS = new Set(['zip','rar','7z']);
+// Etsy allows up to 20 photos; the first 10 cover the artwork plus any
+// infographic/spec images without an AI call per photo on huge listings.
+const MAX_LISTING_PHOTOS = 10;
+
 function allShopFormats(){
   return DEFAULT_AVAILABLE_FORMATS.concat((WB.meta.customFormats||[])
     .filter(f=>!DEFAULT_AVAILABLE_FORMATS.includes(f)));
@@ -1153,9 +1200,9 @@ function assembleDescription(l, productType, templates, verifiedFacts, aiIntro, 
   const vf = verifiedFacts || {};
 
   const fieldText = {
-    includedFormats: (vf.formats && vf.formats.length) ? `Files included: ${vf.formats.join(', ')}.` : '',
-    sizeKerfScaling: [vf.dimensions?`Size: ${vf.dimensions}.`:'', vf.kerf?`Kerf: ${vf.kerf}.`:''].filter(Boolean).join(' '),
-    personalization: vf.personalization==='Yes' ? 'One free personalization is available with purchase when the existing design permits it.' : '',
+    includedFormats: (vf.formats && vf.formats.length) ? `Files included: ${orderFormats(vf.formats).join(', ')}` : '',
+    sizeKerfScaling: [vf.dimensions?`Size: ${vf.dimensions}`:'', vf.kerf?`Kerf: ${vf.kerf}`:''].filter(Boolean).join('\n'),
+    personalization: vf.personalization==='Yes' ? 'One free personalization is included when the design allows it.' : '',
     materialsConstruction: vf.materials ? `Materials: ${vf.materials}.` : '',
     dimensions: vf.dimensions ? `Dimensions: ${vf.dimensions}.` : '',
     productionTime: vf.productionTime ? `Production time: ${vf.productionTime}.` : '',
@@ -1225,6 +1272,7 @@ function emptyWorkbook(){
   return {
     meta: {
       source: 'No workbook loaded yet', importedAt: null,
+      descriptionPlaybookVersion: DESCRIPTION_PLAYBOOK_VERSION,
       activeProjectId: null,
       socialPlatform: 'None', socialPlatformOther: '',
       infographicEnabled: true, infographicLabel: 'Infographic',
@@ -1257,7 +1305,7 @@ const KISMET_AI_RULES = `GOVERNING RULE: Accuracy beats keyword coverage. If a p
 
 RELEVANCE BEATS VOLUME: A high-search or high-conversion phrase is useless if it attracts the wrong buyer or describes something the listing does not contain. High conversion does not rescue a bad match.
 
-TARGET BUYER: Makers, CNC plasma and laser operators, fabricators, and sign shops buying DIGITAL CUT FILES. We are NOT targeting finished-sign shoppers, farmhouse-decor shoppers, or gift buyers. No physical item is sold. Write for someone who will cut this file themselves.
+TARGET BUYER: CNC shops — plasma, laser, router and waterjet operators, fabrication shops and sign shops buying production-ready DIGITAL CUT FILES. We are NOT targeting hobby crafters, Cricut/vinyl makers, finished-sign shoppers, farmhouse-decor shoppers, or gift buyers. No physical item is sold. Write for a shop that will load this file into CAM/nesting software and cut it.
 
 TITLE
 Structure: <strongest accurate buyer phrase> SVG, DXF for CNC Plasma, Laser Cutting
@@ -1298,20 +1346,7 @@ dxf files for plasma / NOT metal sign
 cut files for laser / NOT laser gift
 The rejected versions fail because they shift the buyer toward a finished product, go too broad, or stop describing an actual digital cut file.
 
-DESCRIPTION — required opening line, exact:
-"Welcome to Kismet Cut Ready DXF — cut-ready artwork for CNC plasma and laser."
-Then identify the specific design and what the buyer can make with it, using the primary keyword early and naturally — not as a tag list. Then:
-1. State clearly it's a DIGITAL DOWNLOAD, no physical product ships
-2. What the design is / intended use
-3. File types actually included (only what's really in this listing — never assume)
-4. Cut-ready facts: clean/closed/joined paths, proper spacing
-5. Size, .051" kerf, and scaling limitations when true
-6. Personalization or special construction details if applicable
-7. Compatibility note: buyer verifies the format works with their machine and software
-8. Download information
-9. Digital-product return policy + contact through Etsy Messages for file problems
-10. License: buyer may make finished items, may not resell/share/redistribute the files
-11. Final reminder: no physical product included
+${KISMET_DESCRIPTION_RULES_PLAIN}
 
 NON-NEGOTIABLE FAILURES
 - Never invent a design element, audience, occasion, file type, machine compatibility or use case.
@@ -1391,6 +1426,40 @@ async function loadState(){
     }
     if(Array.isArray(WB.shopSections)) WB.shopSections.forEach(s=>{ s.title = decodeHtmlEntities(s.title); });
     WB.meta.htmlEntitiesDecoded_v1 = true;
+  }
+  // Description playbook v2: moves saved shops off the old description
+  // rules (required "Welcome to Kismet…" line, maker/crafter audience,
+  // three separate no-physical-product lines) onto the Etsy-guided,
+  // CNC-shop rules. Only the DESCRIPTION section and TARGET BUYER line of
+  // each rules text are swapped, so other edits there survive; the digital
+  // template is replaced whole. Everything replaced is kept in
+  // meta.descriptionPlaybookBackup_v1 so nothing is lost. Runs once.
+  if((WB.meta.descriptionPlaybookVersion||1) < DESCRIPTION_PLAYBOOK_VERSION){
+    WB.meta.descriptionPlaybookBackup_v1 = {
+      savedAt: new Date().toISOString(),
+      seoInstructionsV1Draft: WB.meta.seoInstructionsV1Draft,
+      aiRules: WB.aiRules,
+      digitalTemplate: WB.meta.descriptionTemplates && WB.meta.descriptionTemplates.digital,
+      targetBuyer: WB.meta.targetBuyer, notTargetBuyer: WB.meta.notTargetBuyer,
+    };
+    const swapRules = (text, sectionStart, sectionEnd, replacement)=>{
+      if(typeof text!=='string') return text;
+      const a = text.indexOf(sectionStart); if(a<0) return text;
+      const b = text.indexOf(sectionEnd, a); if(b<0) return text;
+      return text.slice(0,a) + replacement + '\n\n' + text.slice(b);
+    };
+    const swapBuyer = (text, replacementLine)=> typeof text==='string'
+      ? text.replace(/^TARGET BUYER: Makers, CNC plasma and laser operators[^\n]*$/m, replacementLine) : text;
+    const v1Buyer = SEO_INSTRUCTIONS_V1_DRAFT_DEFAULT.match(/^TARGET BUYER:[^\n]*$/m)[0];
+    const kBuyer = KISMET_AI_RULES.match(/^TARGET BUYER:[^\n]*$/m)[0];
+    WB.meta.seoInstructionsV1Draft = swapBuyer(
+      swapRules(WB.meta.seoInstructionsV1Draft, '## DESCRIPTION', '## NON-NEGOTIABLE', KISMET_DESCRIPTION_RULES_MD), v1Buyer);
+    WB.aiRules = swapBuyer(
+      swapRules(WB.aiRules, 'DESCRIPTION \u2014 required opening line', 'NON-NEGOTIABLE FAILURES', KISMET_DESCRIPTION_RULES_PLAIN), kBuyer);
+    WB.meta.descriptionTemplates.digital = defaultDescriptionTemplates().digital;
+    if(/^Makers, CNC plasma and laser operators/.test(WB.meta.targetBuyer||'')) WB.meta.targetBuyer = KISMET_TARGET_BUYER;
+    if(/^Finished-sign shoppers, farmhouse-decor shoppers, gift buyers$/.test(WB.meta.notTargetBuyer||'')) WB.meta.notTargetBuyer = KISMET_NOT_TARGET_BUYER;
+    WB.meta.descriptionPlaybookVersion = DESCRIPTION_PLAYBOOK_VERSION;
   }
   try{
     const r2 = await appStorage.get(UI_KEY);
@@ -2563,6 +2632,21 @@ function renderDashboard(){
   const attnBtn = document.getElementById('dashAttnBtn');
   if(attnBtn) attnBtn.addEventListener('click', ()=>{ uiState.lastTab='attention'; saveUiState(); render(); });
 }
+function renderDigitalFilesStatus(l){
+  const df = l.digitalFiles;
+  const src = (l.verifiedFacts||{}).formatsSource;
+  if(!df) return `<div class="section-note" style="margin:0;">File types come from the listing's actual digital files. ${src==='photo'?'The formats above were taken from the listing photos. ':''}Not read yet \u2014 generating a description reads them automatically when the shop is connected.</div>`;
+  const names = df.files.map(f=>escapeHtml(f.name)).join(', ') || '(no files on this listing)';
+  return `<div class="banner ${df.complete?'ok':'warn'}" style="margin:0;"><span class="mono">${df.complete?'\u2713':'i'}</span><span class="fill">
+    <b>Digital files on Etsy:</b> ${names}
+    ${df.formats.length?`<br/><b>File types found:</b> ${df.formats.map(escapeHtml).join(', ')}`:''}
+    ${df.archives.length?`<br/>ZIP/archive contents can't be read through Etsy \u2014 ${src==='photo'?'formats were taken from the listing photos':'check the formats above match what\u2019s inside'}.`:''}
+    ${df.removed.length?`<br/><b>Unchecked</b> (not in the files): ${df.removed.map(escapeHtml).join(', ')}`:''}
+    ${df.notOffered.length?`<br/><b>Not in this shop's format list:</b> ${df.notOffered.map(escapeHtml).join(', ')} \u2014 add it on Playbook to use it.`:''}
+    ${df.unrecognised.length?`<br/><b>Other files:</b> ${df.unrecognised.map(escapeHtml).join(', ')}`:''}
+    <br/><span class="section-note" style="display:inline;">Read ${escapeHtml(String(df.readAt||'').slice(0,10))}</span>
+  </span></div>`;
+}
 function renderArtworkDescription(d){
   if(!d) return '';
   const conf = (d.confidence||'').toLowerCase();
@@ -2868,10 +2952,10 @@ function renderDrawer(l){
       <div class="ws-lbl"><span>Listing photos${(l.imageUrls||[]).length?` (${l.imageUrls.length})`:''}</span></div>
       ${(l.imageUrls||[]).length ? `
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
-          ${l.imageUrls.slice(0,5).map((u,i)=>`<img src="${escapeHtml(u)}" alt="listing photo ${i+1}" style="width:88px; height:88px; object-fit:cover; border-radius:var(--r-md); border:1px solid var(--line);"/>`).join('')}
+          ${l.imageUrls.map((u,i)=>`<img src="${escapeHtml(u)}" alt="listing photo ${i+1}" style="width:88px; height:88px; object-fit:cover; border-radius:var(--r-md); border:1px solid var(--line);"/>`).join('')}
         </div>
-        <div class="section-note" style="margin:0 0 8px 0;">The drafting AI can't see these. Checking the photo gives it a factual description of what's actually in the artwork instead of guessing from the old title.</div>
-        <button class="copy-btn" id="checkPhotoBtn">${l.artworkDescription ? '\u2726 Reread photo' : '\u2726 Check photo &amp; describe artwork'}</button>
+        <div class="section-note" style="margin:0 0 8px 0;">The drafting AI can't see these directly. Checking reads every photo \u2014 the artwork and any infographic or spec images \u2014 so descriptions are built from what's actually shown instead of the old title. Generating a description runs this automatically if it hasn't been done.</div>
+        <button class="copy-btn" id="checkPhotoBtn">${l.artworkDescription ? '\u2726 Reread photos' : '\u2726 Check photos &amp; describe artwork'}</button>
         <div id="photoCheckResult" style="margin-top:8px;">${l.artworkDescription ? renderArtworkDescription(l.artworkDescription) : ''}</div>
       ` : `<div class="section-note" style="margin:0;">No photos pulled yet \u2014 run an Etsy import to fetch them.</div>`}
     </div>
@@ -2889,6 +2973,11 @@ function renderDrawer(l){
         <div style="display:flex; gap:12px; flex-wrap:wrap; padding:6px 0;">
           ${(WB.meta.availableFormats||DEFAULT_AVAILABLE_FORMATS).map(f=>`<label style="display:flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer;"><input type="checkbox" class="ed-vf-format" value="${escapeHtml(f)}" ${(l.verifiedFacts.formats||[]).includes(f)?'checked':''}/> ${escapeHtml(f)}</label>`).join('')}
         </div></div>
+      <div style="margin:0 0 10px 0;">
+        ${renderDigitalFilesStatus(l)}
+        <button class="copy-btn" id="readDigitalFilesBtn" style="margin-top:6px;">${l.digitalFiles ? 'Re-read digital files from Etsy' : 'Read digital files from Etsy'}</button>
+        <span class="result-flash" id="digitalFilesFlash"></span>
+      </div>
       <div class="row2">
         <div class="field" style="margin-bottom:0;"><label>Dimensions</label><input type="text" id="edVfDimensions" value="${escapeHtml(l.verifiedFacts.dimensions||'')}" placeholder="e.g. 12in x 8in"/></div>
         <div class="field" style="margin-bottom:0;"><label>Kerf</label><input type="text" id="edVfKerf" value="${escapeHtml(l.verifiedFacts.kerf||'')}" placeholder="e.g. .051 in"/></div>
@@ -3141,12 +3230,16 @@ function renderDrawer(l){
   document.getElementById('addTagBtn').addEventListener('click', ()=>{ l.tags.push(''); renderTagsEditor(l); refreshGates(l); });
   document.getElementById('saveVerifiedFactsBtn').addEventListener('click', async ()=>{
     l.productType = document.getElementById('edProductType').value;
+    const pickedFormats = Array.from(document.querySelectorAll('.ed-vf-format:checked')).map(cb=>cb.value);
+    // Hand-changed formats stop claiming they came from the files/photos.
+    const formatsChanged = orderFormats(pickedFormats).join(',') !== orderFormats(l.verifiedFacts.formats).join(',');
     l.verifiedFacts = {
-      formats: Array.from(document.querySelectorAll('.ed-vf-format:checked')).map(cb=>cb.value),
+      formats: pickedFormats,
       dimensions: document.getElementById('edVfDimensions').value.trim(),
       kerf: document.getElementById('edVfKerf').value.trim(),
       personalization: document.getElementById('edVfPersonalization').value,
       materials: l.verifiedFacts.materials||'', productionTime: l.verifiedFacts.productionTime||'',
+      formatsSource: formatsChanged ? 'manual' : (l.verifiedFacts.formatsSource || 'manual'),
     };
     const ok = await persistWorkbook();
     const f = document.getElementById('vfSaveFlash');
@@ -3154,19 +3247,26 @@ function renderDrawer(l){
     f.textContent = ok ? 'Saved.' : 'Save failed.';
   });
   document.querySelectorAll('[data-aigen]').forEach(b=> b.addEventListener('click', ()=> draftWithAi(l, b.dataset.aigen)));
+  const readFilesBtn = document.getElementById('readDigitalFilesBtn');
+  if(readFilesBtn) readFilesBtn.addEventListener('click', async ()=>{
+    readFilesBtn.disabled = true; readFilesBtn.textContent = 'Reading files\u2026';
+    try{
+      await readListingFiles(l);
+      await persistWorkbook();
+      renderDrawer(l);
+    }catch(e){
+      const f = document.getElementById('digitalFilesFlash');
+      if(f) f.innerHTML = `<span style="color:var(--red);">Couldn't read the files: ${escapeHtml(e.message)}</span>`;
+      readFilesBtn.disabled = false; readFilesBtn.textContent = 'Read digital files from Etsy';
+    }
+  });
   const checkPhotoBtn = document.getElementById('checkPhotoBtn');
   if(checkPhotoBtn) checkPhotoBtn.addEventListener('click', async ()=>{
     const out = document.getElementById('photoCheckResult');
-    checkPhotoBtn.disabled = true; checkPhotoBtn.textContent = 'Looking at the photo…';
+    checkPhotoBtn.disabled = true; checkPhotoBtn.textContent = 'Looking at the photos…';
     if(out) out.innerHTML = '';
     try{
-      const res = await fetch(AI_PROXY + '/describe-artwork', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ imageUrl: (l.imageUrls||[])[0] }),
-      });
-      const d = await res.json();
-      if(!res.ok || d.error) throw new Error(d.error || `HTTP ${res.status}`);
-      l.artworkDescription = d;
+      await readListingPhotos(l, n=>{ checkPhotoBtn.textContent = `Looking at photo ${n} of ${l.imageUrls.length}\u2026`; });
       await persistWorkbook();
       // renderDrawer() already renders the description AND wires the
       // "Apply these to verified facts" button. Overwriting innerHTML here
@@ -3175,9 +3275,9 @@ function renderDrawer(l){
       renderDrawer(l);
     }catch(e){
       const fresh = document.getElementById('photoCheckResult') || out;
-      if(fresh) fresh.innerHTML = `<div class="banner err" style="margin:0;"><span class="mono">⚠</span><span class="fill">Couldn't check the photo: ${escapeHtml(e.message)}</span></div>`;
+      if(fresh) fresh.innerHTML = `<div class="banner err" style="margin:0;"><span class="mono">⚠</span><span class="fill">Couldn't check the photos: ${escapeHtml(e.message)}</span></div>`;
       const b = document.getElementById('checkPhotoBtn');
-      if(b){ b.disabled=false; b.textContent = l.artworkDescription ? '\u2726 Reread photo' : '\u2726 Check photo & describe artwork'; }
+      if(b){ b.disabled=false; b.textContent = l.artworkDescription ? '\u2726 Reread photos' : '\u2726 Check photos & describe artwork'; }
     }
   });
   const applySpecsBtn = document.getElementById('applyPhotoSpecsBtn');
@@ -3597,6 +3697,7 @@ async function generateOneForBulk(l, field){
   if(!instructions || !instructions.trim()) return { ok:false, message:'No SEO instructions saved (Rules & Playbook).' };
   const useTemplates = WB.meta.useDescriptionTemplates;
   try{
+    const evidenceNotes = (!field || field==='description') ? await prepareDescriptionEvidence(l) : [];
     const res = await fetch(AI_PROXY + '/draft-openai', {
       method:'POST', headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify({
@@ -3607,6 +3708,7 @@ async function generateOneForBulk(l, field){
         researchVersion: WB.meta.seoResearchVersion || '',
         verifiedFacts: l.verifiedFacts, useTemplates,
         artworkDescription: l.artworkDescription || null,
+        ...descriptionEvidencePayload(l),
       }),
     });
     const data = await res.json();
@@ -3618,6 +3720,7 @@ async function generateOneForBulk(l, field){
     }
     const draftForChecks = { ...data, description: assembled ? assembled.description : data.description };
     const v = validateDraft(l, draftForChecks, l.verifiedFacts, assembled, { field });
+    evidenceNotes.forEach(n=>(v.ok ? v.warnings : v.blocking).push(n));
     if(!v.ok) return { ok:false, message: v.blocking.join(' \u00b7 ') };
 
     if((!field || field==='title')) l.proposedTitle = data.title || l.proposedTitle;
@@ -4753,6 +4856,126 @@ function validateDraft(l, draft, verifiedFacts, assembled, opts){
 }
 
 
+// ============================================================
+// DESCRIPTION EVIDENCE — the two sources a description is built from:
+// the listing's actual digital files (what the buyer really downloads,
+// so the authority on file types) and every listing photo (what the
+// design looks like, plus any infographic/spec images).
+// ============================================================
+async function readListingFiles(l){
+  if(!l.etsyListingId) throw new Error('no Etsy listing ID yet — run an Etsy import first');
+  if(!(etsyAuth && etsyAuth.accessToken && etsyAuth.shopId)) throw new Error('Etsy shop not connected');
+  const res = await etsyFetch(`/application/shops/${etsyAuth.shopId}/listings/${l.etsyListingId}/files`);
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || `Etsy returned HTTP ${res.status}`);
+  const files = (data.results||[]).map(f=>({ name: decodeHtmlEntities(f.filename||''), sizeBytes: f.size_bytes||null }));
+  const allowed = allShopFormats().map(f=>f.toUpperCase());
+  const found = [], archives = [], unrecognised = [];
+  files.forEach(f=>{
+    const ext = (f.name.includes('.') ? f.name.split('.').pop() : '').toLowerCase();
+    if(FILE_EXT_FORMATS[ext]) found.push(FILE_EXT_FORMATS[ext]);
+    else if(ARCHIVE_EXTS.has(ext)) archives.push(f.name);
+    else unrecognised.push(f.name);
+  });
+  const formats = orderFormats(found);
+  const notOffered = formats.filter(f=>!allowed.includes(f));
+  const usable = formats.filter(f=>allowed.includes(f));
+  const before = (l.verifiedFacts.formats||[]).slice();
+  // Loose files are the whole package, so they replace what was set by
+  // hand. An archive hides its contents, so formats seen alongside it can
+  // only add — never remove something that may be inside the ZIP.
+  if(usable.length){
+    l.verifiedFacts.formats = archives.length ? orderFormats(before.concat(usable)) : usable;
+    l.verifiedFacts.formatsSource = 'files';
+  }
+  l.digitalFiles = {
+    readAt: new Date().toISOString(), files, formats, archives, unrecognised, notOffered,
+    removed: before.filter(f=>!(l.verifiedFacts.formats||[]).includes(f)),
+    complete: !archives.length && files.length>0,
+  };
+  return l.digitalFiles;
+}
+
+async function readListingPhotos(l, onProgress){
+  const urls = (l.imageUrls||[]).slice(0, MAX_LISTING_PHOTOS);
+  if(!urls.length) throw new Error('no photos pulled yet — run an Etsy import');
+  const perPhoto = [];
+  let lastErr = null;
+  for(let i=0;i<urls.length;i++){
+    if(onProgress) onProgress(i+1);
+    try{
+      const res = await fetch(AI_PROXY + '/describe-artwork', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ imageUrl: urls[i] }),
+      });
+      const d = await res.json();
+      if(!res.ok || d.error) throw new Error(d.error || `HTTP ${res.status}`);
+      perPhoto.push({ ...d, photoIndex:i+1 });
+    }catch(e){ lastErr = e; }
+  }
+  if(!perPhoto.length) throw lastErr || new Error('no photo could be read');
+  const uniq = arr=>{ const seen=new Set(); return arr.filter(x=>{ const k=String(x).toLowerCase().trim(); if(!k||seen.has(k)) return false; seen.add(k); return true; }); };
+  // The first readable photo is the artwork and sets the subject; the
+  // rest (usually infographics/mockups) add elements and printed specs.
+  const main = perPhoto[0];
+  const visibleElements = uniq(perPhoto.flatMap(d=>d.visibleElements||[]));
+  const seenLower = new Set(visibleElements.map(v=>v.toLowerCase()));
+  l.artworkDescription = {
+    ...main,
+    visibleElements,
+    textInArtwork: uniq(perPhoto.map(d=>d.textInArtwork||'')).join(' / '),
+    notVisible: (main.notVisible||[]).filter(n=>!seenLower.has(String(n).toLowerCase())),
+    formatsShownInPhoto: orderFormats(perPhoto.flatMap(d=>d.formatsShownInPhoto||[])),
+    dimensionsShownInPhoto: (perPhoto.find(d=>(d.dimensionsShownInPhoto||'').trim())||{}).dimensionsShownInPhoto || '',
+    otherSpecsShownInPhoto: uniq(perPhoto.map(d=>d.otherSpecsShownInPhoto||'')).join('; '),
+    photosChecked: perPhoto.length, photoCount: urls.length,
+    perPhoto, checkedAt: new Date().toISOString(),
+  };
+  return l.artworkDescription;
+}
+
+// Runs before any description draft. Reads whatever hasn't been read yet
+// (files once; photos until every pulled photo has been checked), and
+// when the files can't confirm a format (ZIP, not connected) falls back
+// to the formats printed on the listing's own photos. Never throws — a
+// source that can't be read is reported, and the template's required
+// "Files included" block still stops the draft if nothing confirmed one.
+async function prepareDescriptionEvidence(l, onStatus){
+  const notes = [];
+  const say = m=>{ if(onStatus) onStatus(m); };
+  if(!l.digitalFiles && l.etsyListingId && etsyAuth && etsyAuth.accessToken){
+    say('Reading digital files…');
+    try{ await readListingFiles(l); }
+    catch(e){ notes.push(`digital files not read (${e.message})`); }
+  }
+  const photoTotal = Math.min((l.imageUrls||[]).length, MAX_LISTING_PHOTOS);
+  const ad = l.artworkDescription;
+  if(photoTotal && (!ad || (ad.photosChecked||1) < photoTotal)){
+    try{ await readListingPhotos(l, n=>say(`Reading photo ${n} of ${photoTotal}…`)); }
+    catch(e){ notes.push(`photos not read (${e.message})`); }
+  }
+  const filesConfirmed = l.digitalFiles && l.digitalFiles.complete && (l.verifiedFacts.formats||[]).length;
+  const photoFormats = ((l.artworkDescription||{}).formatsShownInPhoto||[]).filter(f=>allShopFormats().map(x=>x.toUpperCase()).includes(String(f).toUpperCase()));
+  if(!filesConfirmed && !(l.verifiedFacts.formats||[]).length && photoFormats.length){
+    l.verifiedFacts.formats = orderFormats(photoFormats);
+    l.verifiedFacts.formatsSource = 'photo';
+    notes.push(`file types taken from the listing photos (${l.verifiedFacts.formats.join(', ')}) — the digital files didn't confirm them`);
+  }
+  await persistWorkbook();
+  return notes;
+}
+
+// What the drafting AI is told about the evidence above, on top of
+// verifiedFacts/artworkDescription.
+function descriptionEvidencePayload(l){
+  const df = l.digitalFiles;
+  return {
+    digitalFiles: df ? { fileNames: df.files.map(f=>f.name), formats: df.formats, archives: df.archives, complete: df.complete } : null,
+    formatsSource: l.verifiedFacts.formatsSource || 'manual',
+    photoCount: (l.imageUrls||[]).length,
+  };
+}
+
 async function draftWithAi(l, field){
   const btn = document.querySelector(field ? `[data-aigen="${field}"]` : '#draftWithAiBtn');
   const resultEl = document.getElementById(field ? `aiGenResult_${field}` : 'aiDraftResult');
@@ -4780,6 +5003,7 @@ async function draftWithAi(l, field){
         researchVersion: WB.meta.seoResearchVersion || '',
         verifiedFacts: l.verifiedFacts, useTemplates,
         artworkDescription: l.artworkDescription || null,
+        ...descriptionEvidencePayload(l),
       }),
     });
     const data = await res.json();
@@ -4788,6 +5012,11 @@ async function draftWithAi(l, field){
   }
 
   try{
+    let evidenceNotes = [];
+    if(!field || field==='description'){
+      evidenceNotes = await prepareDescriptionEvidence(l, m=>{ if(btn) btn.textContent = m; });
+      if(btn) btn.textContent = 'Generating\u2026';
+    }
     const data = await requestDraft(null);
 
     // One well-structured request, one charge. No automatic retry.
@@ -4802,6 +5031,7 @@ async function draftWithAi(l, field){
     const draftForChecks = { ...data, description: assembled ? assembled.description : data.description };
 
     const v = validateDraft(l, draftForChecks, l.verifiedFacts, assembled, { field });
+    evidenceNotes.forEach(n=>(v.ok ? v.warnings : v.blocking).push(n));
 
     // Commit ALL requested fields together, or none of them.
     if(v.ok){
@@ -6769,7 +6999,7 @@ async function importFromEtsy(silent){
         existing.etsyUrl = item.url || existing.etsyUrl;
         existing.etsyLastModified = newTs;
         existing.shopSectionId = item.shop_section_id || null;
-        existing.imageUrls = (item.images||[]).slice(0,1).map(im=>im.url_570xN||im.url_fullxfull).filter(Boolean);
+        existing.imageUrls = (item.images||[]).slice(0,MAX_LISTING_PHOTOS).map(im=>im.url_570xN||im.url_fullxfull).filter(Boolean);
         updated++;
       } else {
         const fresh = {
@@ -6783,7 +7013,7 @@ async function importFromEtsy(silent){
           etsyLastModified: item.last_modified_timestamp || null,
           etsyUrl: item.url || null, etsyChangedExternally: false,
           shopSectionId: item.shop_section_id || null,
-          imageUrls: (item.images||[]).slice(0,1).map(im=>im.url_570xN||im.url_fullxfull).filter(Boolean),
+          imageUrls: (item.images||[]).slice(0,MAX_LISTING_PHOTOS).map(im=>im.url_570xN||im.url_fullxfull).filter(Boolean),
         };
         WB.listings.push(fresh);
         bySku[sku] = fresh;
