@@ -1193,6 +1193,39 @@ function allShopFormats(){
 // order. A required block with no usable content returns needsReview
 // instead of guessing or inserting filler ("size and kerf information
 // are not supplied" is exactly the kind of line this must never produce).
+// Code-level guard on the two AI-written blocks, so the output follows the
+// playbook even when the model (or an older saved rules text) doesn't:
+// - no shop greeting ("Welcome to Kismet…") — Etsy's preview is the first
+//   sentence, and it must say what the item is;
+// - the opening is ONE sentence, the design/use text at most TWO;
+// - the use text never restates what the fixed blocks already say (digital
+//   download, file types, size, compatibility, returns, license);
+// - common filler clauses are trimmed.
+const DESC_GREETING_RE = /\b(welcome to kismet|thanks? (you )?for (stopping|visiting|shopping)|cut[- ]ready artwork for cnc)/i;
+const DESC_FIXED_FACT_RE = /\b(digital (download|product|file)s?|downloadable|no physical|physical (product|item)|will (not |never )?be (shipped|mailed)|ship(ped|s)?\b|file (format|type)s?|formats?\b|files? included|includes? (svg|dxf|png|dwg|jpg|eps|pdf)|dimensions?|measures?|inch(es)?|\d+(\.\d+)?\s*("|”|in\b|mm\b|cm\b|x\s*\d)|verify|compatib|return|refund|exchange|cancell?ation|licen[cs]e|resell|redistribut|etsy messages|purchase)/i;
+const DESC_FILLER_RULES = [
+  [/,?\s*\b(perfect|ideal|great|suitable|excellent)\s+for\s+[^.;!?]*/gi, ''],
+  [/,?\s*\bensuring\s+[^.;!?]*/gi, ''],
+  [/,?\s*\b(making it|which makes it)\s+(perfect|ideal|great|easy)[^.;!?]*/gi, ''],
+  [/\b(stunning|beautiful|amazing|gorgeous|unique|high[- ]quality|must[- ]have|charming|lovely)\s+/gi, ''],
+  [/\b(add a touch of|bring your [^.;!?]*? to life|look no further)[^.;!?]*/gi, ''],
+];
+function cleanAiDescriptionText(raw, key){
+  let text = String(raw||'').replace(/\s+/g,' ').trim();
+  if(!text) return '';
+  let sentences = text.split(/(?<=[.!?])\s+(?=[A-Z0-9"'“‘(])/).map(x=>x.trim()).filter(Boolean);
+  sentences = sentences.filter(x=>!DESC_GREETING_RE.test(x));
+  if(key==='useAI') sentences = sentences.filter(x=>!DESC_FIXED_FACT_RE.test(x));
+  sentences = sentences.map(x=>{
+    let y = x;
+    DESC_FILLER_RULES.forEach(([re,rep])=>{ y = y.replace(re, rep); });
+    y = y.replace(/\s+([,.;!?])/g,'$1').replace(/,\s*([.!?])$/,'$1').replace(/!+/g,'.').trim();
+    if(y && !/[.!?]$/.test(y)) y += '.';
+    return y.charAt(0).toUpperCase() + y.slice(1);
+  }).filter(x=>x.replace(/[^a-z0-9]/gi,'').length > 3);
+  return sentences.slice(0, key==='introAI' ? 1 : 2).join(' ');
+}
+
 function assembleDescription(l, productType, templates, verifiedFacts, aiIntro, aiUse){
   const blocks = (templates[productType]||[]).filter(b=>b.status!=='disabled').sort((a,b)=>a.order-b.order);
   const lines = [];
@@ -1211,7 +1244,10 @@ function assembleDescription(l, productType, templates, verifiedFacts, aiIntro, 
   blocks.forEach(b=>{
     let text = '';
     if(DESC_AI_WRITABLE_BLOCKS.has(b.key)){
-      text = b.key==='introAI' ? (aiIntro||'') : (aiUse||'');
+      text = cleanAiDescriptionText(b.key==='introAI' ? aiIntro : aiUse, b.key);
+      // The use paragraph can legitimately come back empty once repeats are
+      // stripped — that's not missing data, so it's dropped, not blocked.
+      if(b.key==='useAI' && !text && (aiUse||'').trim()) return;
     } else if(fieldText.hasOwnProperty(b.key)){
       text = fieldText[b.key];
     } else {
@@ -2131,7 +2167,11 @@ async function handleFullBackupImport(file){
     return { ok:false, message:'That doesn\'t look like a Kismet full backup file.' };
   }
   WB = data;
-  const ok = await persistWorkbook();
+  // Save, then reload through loadState so a backup made on an older
+  // version gets the same migrations (description playbook etc.) as a
+  // normal page load, instead of running on stale rules until a refresh.
+  let ok = await persistWorkbook();
+  if(ok){ await loadState(); ok = await persistWorkbook(); }
   return { ok, message: ok ? 'Full backup restored — every field, not just listings.' : 'Restored in memory, but saving locally failed.' };
 }
 
@@ -7316,7 +7356,8 @@ async function pullFromCloud(profileId){
     }
     await setActiveProfile(data.profile_id);
     WB = data.workbook;
-    const ok = await persistWorkbook();
+    let ok = await persistWorkbook();
+    if(ok){ await loadState(); ok = await persistWorkbook(); } // run migrations on the cloud copy
     syncStatus = ok
       ? { ok:true, message:`Loaded "${data.label}" from your account.` }
       : { ok:false, message:'Downloaded but saving locally failed.' };
