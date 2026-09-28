@@ -2284,7 +2284,7 @@ function shopHealthScoreBar(score){
 
 function shopHealth(){
   const live = WB.listings.filter(l=>!l.isDraft);
-  const health = { fewTags:[], longTags:[], longTitle:[], dupeTitle:[], redundantTags:[], pluralWaste:[], noDescription:[], stale:[], repeatedWord:[], flatViews:[], draftNotPushed:[], noVerifiedFacts:[], noSection:[] };
+  const health = { fewTags:[], longTags:[], longTitle:[], dupeTitle:[], redundantTags:[], pluralWaste:[], noDescription:[], stale:[], repeatedWord:[], flatViews:[], draftNotPushed:[], noSection:[] };
   // SKUs already pushed by some project — used to spot written-but-never-live work.
   const pushedSkus = new Set((WB.projects||[]).flatMap(p=>p.pushed||[]));
   const titleGroups = {};
@@ -2295,7 +2295,6 @@ function shopHealth(){
     // Real work sitting idle: a draft was written but never went live.
     if((l.proposedTitle||'').trim() && !pushedSkus.has(l.sku)) health.draftNotPushed.push(l);
     // Without confirmed formats, AI generation has nothing solid to work from.
-    if(!((l.verifiedFacts&&l.verifiedFacts.formats)||[]).length) health.noVerifiedFacts.push(l);
     // Unsectioned listings are hard for buyers to browse.
     if(!l.shopSectionId) health.noSection.push(l);
     if(tags.some(t=>t.length>20)) health.longTags.push(l);
@@ -2364,7 +2363,6 @@ const HEALTH_META = {
   stale:        { label:'Not touched in over a year',         blurb:'Etsy shows this listing was last modified more than 365 days ago.', scope:'full', icon:'\u{1F4C5}' },
   flatViews:    { label:'Flat or declining views',            blurb:'No real view growth over 10+ tracked days \u2014 worth a look. Needs enough snapshot history to mean anything.', scope:'full', icon:'\u{1F4C9}' },
   draftNotPushed:{ label:'Draft written, never pushed',       blurb:'A new title is sitting on these listings but was never sent to Etsy \u2014 finished work that isn\'t earning anything yet.', scope:'full', icon:'\u{1F4E4}' },
-  noVerifiedFacts:{ label:'No verified formats set',          blurb:'AI generation has nothing solid to work from on these \u2014 it can\'t claim a file format that was never confirmed, so drafts stay vague.', scope:'full', icon:'\u2753' },
   noSection:    { label:'Not in a shop section',              blurb:'Unsectioned listings are harder for buyers to browse, and they can\'t be filtered by section when building a project.', scope:'shopSection', icon:'\u{1F5C2}' },
 };
 let dashHealthOpen = null;
@@ -3755,6 +3753,17 @@ async function runBulkGenerate(project, listings, field){
   renderProjects();
 }
 
+// After listings land in a project, show that project from the top —
+// its actions sit right under the header, so there's nothing to scroll for.
+function showProjectAfterAdding(pid, count){
+  projectState.openProjectId = pid;
+  projectState.pickerFor = null; projectState.confirmBulk = null;
+  projectState.justAdded = { pid, count };
+  uiState.lastTab = 'projects'; saveUiState();
+  render();
+  const main = document.getElementById('main'); if(main) main.scrollTop = 0;
+  window.scrollTo(0,0);
+}
 function renderProjects(){
   const projects = WB.projects || [];
   const activeId = WB.meta.activeProjectId;
@@ -3850,33 +3859,71 @@ function renderProjects(){
             <button class="btn danger" data-delproj="${p.id}">Delete</button>
           </div>
         </div>
-        ${(()=>{
-          const rows = p.skus.map(sku=>({ sku, l: WB.listings.find(x=>x.sku===sku) }));
-          if(!rows.length) return `<div class="empty-hint" style="margin-top:14px;">No listings in this project yet \u2014 use "Add listings" above.</div>`;
-          const flaggedCount = rows.filter(r=>r.l && !r.l.batchVerified && visibleFlags(r.l).length).length;
-          const excluded = excludedSetFor(p.id);
-          return `<div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
-            ${flaggedCount ? `<div class="banner warn" style="margin-bottom:12px;"><span class="mono">!</span><span class="fill"><b>${flaggedCount}</b> listing${flaggedCount===1?'':'s'} in this project still ${flaggedCount===1?'has':'have'} unresolved verification notes from the prepared batch.</span><button data-clearallflags="${p.id}">Clear all</button></div>` : ''}
-            <div class="section-note" style="margin-bottom:10px;">Uncheck any listing you don't want touched next time this project pushes to Etsy \u2014 this is remembered here and in the push confirmation.</div>
-            <div class="priority-list">
-              ${rows.map(r=>{
-                const pushed = (p.pushed||[]).includes(r.sku);
-                if(!r.l) return `<div class="priority-row" style="cursor:default; border-left-color:var(--red);">
-                  <span class="sku">${escapeHtml(r.sku)}</span>
-                  <span class="title" style="color:var(--red);">Not found in this shop \u2014 remove or re-import</span>
-                </div>`;
-                const flagged = !r.l.batchVerified && visibleFlags(r.l).length;
-                return `<div class="priority-row" style="${pushed?'border-left-color:var(--green);':''}${flagged?'border-left-color:var(--amber);':''}">
-                  ${pushed?'':`<input type="checkbox" data-reviewcheck="${r.sku}" data-reviewcheckproj="${p.id}" ${excluded.has(r.sku)?'':'checked'} style="flex-shrink:0;"/>`}
-                  <span class="sku" data-openlisting="${r.sku}" style="cursor:pointer;">${escapeHtml(r.sku)}</span>
-                  <span class="title" data-openlisting="${r.sku}" style="cursor:pointer;">${escapeHtml(r.l.oldTitle||r.l.proposedTitle||'(no title)')}</span>
-                  ${pushed?'<span class="badge updated">PUSHED</span>':''}
-                  ${flagged?`<button class="copy-btn" data-clearflag="${r.sku}">Clear check (${visibleFlags(r.l).length})</button>`:''}
-                  <span class="go" data-openlisting="${r.sku}" style="cursor:pointer;">OPEN \u2192</span>
-                </div>`;
-              }).join('')}
-            </div>
-            ${p.skus.some(sku=>!(p.pushed||[]).includes(sku)) ? `
+        ${projectState.justAdded && projectState.justAdded.pid===p.id ? `<div class="banner ok" style="margin-top:14px;"><span class="mono">\u2713</span><span class="fill">Added <b>${projectState.justAdded.count}</b> listing${projectState.justAdded.count===1?'':'s'} to this project.</span></div>` : ''}
+        ${projectState.pickerFor===p.id ? (()=>{
+          const alreadyIn = new Set(p.skus);
+          const retired = new Set(WB.meta.retiredSkus||[]);
+          const search = (projectState.pickerSearch||'').toLowerCase();
+          const sectionFilter = projectState.pickerSection||'';
+          let candidates = WB.listings.filter(l=>{
+            if(l.isDraft || alreadyIn.has(l.sku) || retired.has(l.sku)) return false;
+            if(sectionFilter && String(l.shopSectionId)!==sectionFilter) return false;
+            if(search && !(l.sku.toLowerCase().includes(search) || (l.oldTitle||'').toLowerCase().includes(search))) return false;
+            return true;
+          });
+          const sortCol = projectState.pickerSortCol || 'sku';
+          const sortDir = projectState.pickerSortDir || 'asc';
+          const dir = sortDir==='asc' ? 1 : -1;
+          candidates = candidates.slice().sort((a,b)=>{
+            let av, bv;
+            if(sortCol==='title'){ av=(a.oldTitle||'').toLowerCase(); bv=(b.oldTitle||'').toLowerCase(); }
+            else { av=a.sku; bv=b.sku; }
+            if(av<bv) return -1*dir; if(av>bv) return 1*dir; return 0;
+          });
+          const arrow = (col)=> sortCol===col ? (sortDir==='asc'?' \u25b2':' \u25bc') : '';
+          const selected = projectState.pickerSelected || [];
+          // The full filtered set, not just the 200 rendered as checkboxes \u2014
+          // "select all" should mean all matches, so the picker's own
+          // handler below reads this instead of re-deriving the filter.
+          projectState.pickerCandidateSkus = candidates.map(l=>l.sku);
+          const allCandidatesSelected = candidates.length>0 && candidates.every(l=>selected.includes(l.sku));
+          return `
+        <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
+          <div class="row2">
+            <div class="field" style="margin-bottom:0;"><label>Search by SKU or title</label>
+              <input type="text" id="pickerSearchInput" value="${escapeHtml(projectState.pickerSearch||'')}" placeholder="e.g. 0011 or farm sign"/></div>
+            <div class="field" style="margin-bottom:0;"><label>Filter by shop section</label>
+              <select id="pickerSectionSelect">
+                <option value="">\u2014 all sections \u2014</option>
+                ${(WB.shopSections||[]).map(s=>`<option value="${s.id}" ${sectionFilter===String(s.id)?'selected':''}>${escapeHtml(s.title)}</option>`).join('')}
+              </select></div>
+          </div>
+          <div class="section-note" style="margin:8px 0 6px 0;">${candidates.length} match${candidates.length===1?'':'es'} \u2014 ${selected.length} selected</div>
+          ${candidates.length ? `<div style="display:flex; align-items:center; gap:10px; padding:6px 12px; font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--smoke-dim); text-transform:uppercase; letter-spacing:0.1em;">
+            <span style="width:16px;"><input type="checkbox" id="pickerSelectAll" ${allCandidatesSelected?'checked':''} title="Select all matches"/></span>
+            <span data-pickersort="sku" style="width:50px; flex-shrink:0; cursor:pointer;">SKU${arrow('sku')}</span>
+            <span data-pickersort="title" style="flex:1; cursor:pointer;">TITLE${arrow('title')}</span>
+            <span style="flex-shrink:0;">SECTION</span>
+          </div>` : ''}
+          <div class="card-scroll" style="max-height:280px; margin-bottom:12px;">
+            ${candidates.length ? candidates.slice(0,200).map(l=>`
+              <label style="display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line-soft); cursor:pointer; font-size:13px;">
+                <input type="checkbox" class="picker-check" value="${l.sku}" ${selected.includes(l.sku)?'checked':''}/>
+                <span class="sku" style="width:50px; flex-shrink:0;">${l.sku}</span>
+                <span style="flex:1;">${escapeHtml(l.oldTitle||'(no title)')}</span>
+                ${l.shopSectionId?`<span class="badge notreviewed" style="flex-shrink:0;">${escapeHtml(sectionNameFor(l.shopSectionId)||'')}</span>`:''}
+              </label>`).join('') : `<div class="empty-hint">Nothing matches.</div>`}
+          </div>
+          <button class="btn primary" data-addselected="${p.id}" ${selected.length===0?'disabled':''}>Add ${selected.length} selected</button>
+          <button class="btn" data-cancelsku="1">Cancel</button>
+          <details style="margin-top:14px;"><summary class="copy-btn" style="display:inline-block; cursor:pointer;">Or paste SKUs directly</summary>
+            <div class="field" style="margin-top:10px;"><label>Paste SKUs (one per line, or comma separated)</label>
+              <textarea id="skuPaste" style="min-height:70px; width:100%; background:var(--panel); border:1px solid var(--line); border-radius:8px; color:var(--ink); padding:10px 12px; font-family:'IBM Plex Mono',monospace; font-size:13px;"></textarea></div>
+            <button class="btn primary" data-savesku="${p.id}">Add pasted SKUs</button>
+          </details>
+        </div>`;
+        })() : ''}
+        ${p.skus.length && p.skus.some(sku=>!(p.pushed||[]).includes(sku)) ? `
             <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
               <div class="ws-lbl"><span>Generate drafts with AI</span></div>
               <div class="section-note" style="margin:4px 0 10px 0;">Writes drafts onto these listings for you to review \u2014 it does <b>not</b> push anything to Etsy. One API call per listing, so a large project costs real money; nothing is applied for a listing whose draft fails validation.</div>
@@ -3895,10 +3942,8 @@ function renderProjects(){
                   </select></div>
               </div>
               <button class="btn" data-bulkgen="${p.id}" ${bulkGenState.running?'disabled':''}>${bulkGenState.running?'Generating…':'\u2726 Generate drafts for these listings'}</button>
-            </div>
-            <button class="btn primary" data-bulk="${p.id}" style="width:100%; margin-top:16px;">Push all to Etsy</button>` : ''}
-          </div>`;
-        })()}
+              <button class="btn primary" data-bulk="${p.id}" style="margin-left:8px;">Push all to Etsy</button>
+            </div>` : ''}
         ${bulkGenState.projectId===p.id && (bulkGenState.running || bulkGenState.log.length) ? `
         <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
           <div class="k" style="margin-bottom:8px;">${bulkGenState.running ? `GENERATING — ${bulkGenState.done} OF ${bulkGenState.total}` : `RUN FINISHED — ${bulkGenState.log.filter(x=>x.ok).length} APPLIED, ${bulkGenState.log.filter(x=>!x.ok).length} SKIPPED`}</div>
@@ -3963,69 +4008,34 @@ function renderProjects(){
             : `<div class="empty-hint">Nothing is ready to push in this project.</div>
                <button class="btn" data-bulkcancelconfirm="1">Close</button>`}
         </div>`; })() : ''}
-        ${projectState.pickerFor===p.id ? (()=>{
-          const alreadyIn = new Set(p.skus);
-          const retired = new Set(WB.meta.retiredSkus||[]);
-          const search = (projectState.pickerSearch||'').toLowerCase();
-          const sectionFilter = projectState.pickerSection||'';
-          let candidates = WB.listings.filter(l=>{
-            if(l.isDraft || alreadyIn.has(l.sku) || retired.has(l.sku)) return false;
-            if(sectionFilter && String(l.shopSectionId)!==sectionFilter) return false;
-            if(search && !(l.sku.toLowerCase().includes(search) || (l.oldTitle||'').toLowerCase().includes(search))) return false;
-            return true;
-          });
-          const sortCol = projectState.pickerSortCol || 'sku';
-          const sortDir = projectState.pickerSortDir || 'asc';
-          const dir = sortDir==='asc' ? 1 : -1;
-          candidates = candidates.slice().sort((a,b)=>{
-            let av, bv;
-            if(sortCol==='title'){ av=(a.oldTitle||'').toLowerCase(); bv=(b.oldTitle||'').toLowerCase(); }
-            else { av=a.sku; bv=b.sku; }
-            if(av<bv) return -1*dir; if(av>bv) return 1*dir; return 0;
-          });
-          const arrow = (col)=> sortCol===col ? (sortDir==='asc'?' \u25b2':' \u25bc') : '';
-          const selected = projectState.pickerSelected || [];
-          // The full filtered set, not just the 200 rendered as checkboxes \u2014
-          // "select all" should mean all matches, so the picker's own
-          // handler below reads this instead of re-deriving the filter.
-          projectState.pickerCandidateSkus = candidates.map(l=>l.sku);
-          const allCandidatesSelected = candidates.length>0 && candidates.every(l=>selected.includes(l.sku));
-          return `
-        <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
-          <div class="row2">
-            <div class="field" style="margin-bottom:0;"><label>Search by SKU or title</label>
-              <input type="text" id="pickerSearchInput" value="${escapeHtml(projectState.pickerSearch||'')}" placeholder="e.g. 0011 or farm sign"/></div>
-            <div class="field" style="margin-bottom:0;"><label>Filter by shop section</label>
-              <select id="pickerSectionSelect">
-                <option value="">\u2014 all sections \u2014</option>
-                ${(WB.shopSections||[]).map(s=>`<option value="${s.id}" ${sectionFilter===String(s.id)?'selected':''}>${escapeHtml(s.title)}</option>`).join('')}
-              </select></div>
-          </div>
-          <div class="section-note" style="margin:8px 0 6px 0;">${candidates.length} match${candidates.length===1?'':'es'} \u2014 ${selected.length} selected</div>
-          ${candidates.length ? `<div style="display:flex; align-items:center; gap:10px; padding:6px 12px; font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--smoke-dim); text-transform:uppercase; letter-spacing:0.1em;">
-            <span style="width:16px;"><input type="checkbox" id="pickerSelectAll" ${allCandidatesSelected?'checked':''} title="Select all matches"/></span>
-            <span data-pickersort="sku" style="width:50px; flex-shrink:0; cursor:pointer;">SKU${arrow('sku')}</span>
-            <span data-pickersort="title" style="flex:1; cursor:pointer;">TITLE${arrow('title')}</span>
-            <span style="flex-shrink:0;">SECTION</span>
-          </div>` : ''}
-          <div class="card-scroll" style="max-height:280px; margin-bottom:12px;">
-            ${candidates.length ? candidates.slice(0,200).map(l=>`
-              <label style="display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line-soft); cursor:pointer; font-size:13px;">
-                <input type="checkbox" class="picker-check" value="${l.sku}" ${selected.includes(l.sku)?'checked':''}/>
-                <span class="sku" style="width:50px; flex-shrink:0;">${l.sku}</span>
-                <span style="flex:1;">${escapeHtml(l.oldTitle||'(no title)')}</span>
-                ${l.shopSectionId?`<span class="badge notreviewed" style="flex-shrink:0;">${escapeHtml(sectionNameFor(l.shopSectionId)||'')}</span>`:''}
-              </label>`).join('') : `<div class="empty-hint">Nothing matches.</div>`}
-          </div>
-          <button class="btn primary" data-addselected="${p.id}" ${selected.length===0?'disabled':''}>Add ${selected.length} selected</button>
-          <button class="btn" data-cancelsku="1">Cancel</button>
-          <details style="margin-top:14px;"><summary class="copy-btn" style="display:inline-block; cursor:pointer;">Or paste SKUs directly</summary>
-            <div class="field" style="margin-top:10px;"><label>Paste SKUs (one per line, or comma separated)</label>
-              <textarea id="skuPaste" style="min-height:70px; width:100%; background:var(--panel); border:1px solid var(--line); border-radius:8px; color:var(--ink); padding:10px 12px; font-family:'IBM Plex Mono',monospace; font-size:13px;"></textarea></div>
-            <button class="btn primary" data-savesku="${p.id}">Add pasted SKUs</button>
-          </details>
-        </div>`;
-        })() : ''}
+        ${(()=>{
+          const rows = p.skus.map(sku=>({ sku, l: WB.listings.find(x=>x.sku===sku) }));
+          if(!rows.length) return `<div class="empty-hint" style="margin-top:14px;">No listings in this project yet \u2014 use "Add listings" above.</div>`;
+          const flaggedCount = rows.filter(r=>r.l && !r.l.batchVerified && visibleFlags(r.l).length).length;
+          const excluded = excludedSetFor(p.id);
+          return `<div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
+            ${flaggedCount ? `<div class="banner warn" style="margin-bottom:12px;"><span class="mono">!</span><span class="fill"><b>${flaggedCount}</b> listing${flaggedCount===1?'':'s'} in this project still ${flaggedCount===1?'has':'have'} unresolved verification notes from the prepared batch.</span><button data-clearallflags="${p.id}">Clear all</button></div>` : ''}
+            <div class="section-note" style="margin-bottom:10px;">Uncheck any listing you don't want touched next time this project pushes to Etsy \u2014 this is remembered here and in the push confirmation.</div>
+            <div class="card-scroll" style="max-height:520px;"><div class="priority-list">
+              ${rows.map(r=>{
+                const pushed = (p.pushed||[]).includes(r.sku);
+                if(!r.l) return `<div class="priority-row" style="cursor:default; border-left-color:var(--red);">
+                  <span class="sku">${escapeHtml(r.sku)}</span>
+                  <span class="title" style="color:var(--red);">Not found in this shop \u2014 remove or re-import</span>
+                </div>`;
+                const flagged = !r.l.batchVerified && visibleFlags(r.l).length;
+                return `<div class="priority-row" style="${pushed?'border-left-color:var(--green);':''}${flagged?'border-left-color:var(--amber);':''}">
+                  ${pushed?'':`<input type="checkbox" data-reviewcheck="${r.sku}" data-reviewcheckproj="${p.id}" ${excluded.has(r.sku)?'':'checked'} style="flex-shrink:0;"/>`}
+                  <span class="sku" data-openlisting="${r.sku}" style="cursor:pointer;">${escapeHtml(r.sku)}</span>
+                  <span class="title" data-openlisting="${r.sku}" style="cursor:pointer;">${escapeHtml(r.l.oldTitle||r.l.proposedTitle||'(no title)')}</span>
+                  ${pushed?'<span class="badge updated">PUSHED</span>':''}
+                  ${flagged?`<button class="copy-btn" data-clearflag="${r.sku}">Clear check (${visibleFlags(r.l).length})</button>`:''}
+                  <span class="go" data-openlisting="${r.sku}" style="cursor:pointer;">OPEN \u2192</span>
+                </div>`;
+              }).join('')}
+            </div></div>
+          </div>`;
+        })()}
       </div>`;
   } else {
     // ---------- LIST VIEW: a clean, clickable list of projects ----------
@@ -4073,10 +4083,10 @@ function renderProjects(){
   document.getElementById('content').innerHTML = html;
 
   const backBtn = document.getElementById('backToProjectsBtn');
-  if(backBtn) backBtn.addEventListener('click', ()=>{ projectState.openProjectId = null; renderProjects(); });
+  if(backBtn) backBtn.addEventListener('click', ()=>{ projectState.openProjectId = null; projectState.justAdded = null; renderProjects(); });
   document.querySelectorAll('[data-openproject]').forEach(el=> el.addEventListener('click', ()=>{
     projectState.openProjectId = el.dataset.openproject;
-    projectState.confirmBulk = null; projectState.pickerFor = null;
+    projectState.confirmBulk = null; projectState.pickerFor = null; projectState.justAdded = null;
     renderProjects();
   }));
 
@@ -4095,9 +4105,8 @@ function renderProjects(){
     pa.skus.forEach(s=>{ if(!p.skus.includes(s)){ p.skus.push(s); added++; } });
     WB.meta.activeProjectId = p.id;
     projectState.pendingAssign = null;
-    projectState.openProjectId = p.id; // straight into it
     await persistWorkbook();
-    render();
+    showProjectAfterAdding(p.id, added);
   });
   const assignNewBtn = document.getElementById('assignNewBtn');
   if(assignNewBtn) assignNewBtn.addEventListener('click', async ()=>{
@@ -4109,9 +4118,8 @@ function renderProjects(){
     WB.projects.push({ id, name, scope, skus: pa.skus.slice(), pushed:[], loggedSkus:[], created: todayISO });
     WB.meta.activeProjectId = id;
     projectState.pendingAssign = null;
-    projectState.openProjectId = id; // straight into it
     await persistWorkbook();
-    render();
+    showProjectAfterAdding(id, pa.skus.length);
   });
   const assignCancelBtn = document.getElementById('assignCancelBtn');
   if(assignCancelBtn) assignCancelBtn.addEventListener('click', ()=>{
@@ -4152,8 +4160,12 @@ function renderProjects(){
       targetShopSectionId: scope==='shopSection' ? document.getElementById('npTargetSection').value : null,
     });
     if(!WB.meta.activeProjectId) WB.meta.activeProjectId = id;
-    projectState.openProjectId = id; // straight into it, ready to add listings
+    projectState.openProjectId = id; // straight into it, with the picker open
     projectState.openNewProjectForm = false;
+    projectState.justAdded = null;
+    projectState.pickerFor = id;
+    projectState.pickerSearch = ''; projectState.pickerSection = ''; projectState.pickerSelected = [];
+    projectState.pickerSortCol = 'sku'; projectState.pickerSortDir = 'asc';
     await persistWorkbook(); render();
   });
 
@@ -4255,10 +4267,11 @@ function renderProjects(){
   document.querySelectorAll('[data-addselected]').forEach(b=> b.addEventListener('click', async ()=>{
     const p = WB.projects.find(x=>x.id===b.dataset.addselected);
     const selected = projectState.pickerSelected || [];
-    selected.forEach(sku=>{ if(!p.skus.includes(sku)) p.skus.push(sku); });
+    let count = 0;
+    selected.forEach(sku=>{ if(!p.skus.includes(sku)){ p.skus.push(sku); count++; } });
     await persistWorkbook();
     projectState.pickerFor = null; projectState.pickerSelected = [];
-    render();
+    showProjectAfterAdding(p.id, count);
   }));
   document.querySelectorAll('[data-savesku]').forEach(b=> b.addEventListener('click', async ()=>{
     const p = WB.projects.find(x=>x.id===b.dataset.savesku);
@@ -4273,8 +4286,8 @@ function renderProjects(){
     });
     await persistWorkbook();
     projectState.pickerFor = null; projectState.pickerSelected = [];
-    render();
-    alert(`Added ${added.length} listing(s).${unknown.length?` ${unknown.length} SKU(s) not found in this shop: ${unknown.slice(0,10).join(', ')}${unknown.length>10?'…':''}`:''}`);
+    showProjectAfterAdding(p.id, added.length);
+    if(unknown.length) alert(`Added ${added.length} listing(s). ${unknown.length} SKU(s) not found in this shop: ${unknown.slice(0,10).join(', ')}${unknown.length>10?'…':''}`);
   }));
   document.querySelectorAll('[data-bulk]').forEach(b=> b.addEventListener('click', ()=>{
     projectState.confirmBulk = b.dataset.bulk;
