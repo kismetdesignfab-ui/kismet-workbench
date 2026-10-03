@@ -1,6 +1,6 @@
 # Listing description rules
 
-Settled with the shop owner over batches 1–2. Every rewrite follows these.
+House style for listing descriptions. Every rewrite follows these.
 
 ## Source of truth
 - Sizes, kerf and file types come only from the listing's own photos: the round mockup, the
@@ -14,6 +14,8 @@ Settled with the shop owner over batches 1–2. Every rewrite follows these.
 - Count pieces from the folder (Note 1–7 means seven) when the old text disagrees.
 
 ## Voice
+- Never describe the photos ("The photos show…", "The first photo is…"). Buyers can see them.
+  Describe the design itself.
 - First person, "I / me". Plain, factual, fabricator to fabricator.
 - No sales talk: no "perfect for", "sells well", "makes a great gift", lists of who it's for,
   "beautifully", "cuts cleanly".
@@ -22,17 +24,16 @@ Settled with the shop owner over batches 1–2. Every rewrite follows these.
 
 ## Layout (Shopify HTML)
 1. One or two sentences on what's in the design.
-2. One sentence on what the photos show (SheetCam / Illustrator screenshots, real cut pieces).
-3. Spec block, one per line with `<br>`:
+2. Spec block, one per line with `<br>`:
    Size (or one line per piece) · Kerf · Files ·
    `License: commercial use of finished pieces allowed; no sharing or resale of files` ·
    `Instant download. Nothing ships.`
-4. `Also in:` links to bundles that contain it (Shopify only).
+3. `Also in:` links to bundles that contain it (Shopify only).
    Bundles not on Etsy get `Only on cutreadydxf.com. Bundles and sets aren't sold on Etsy.` after
    the intro, and a "cutreadydxf.com exclusive" pill on the preview graphic.
-5. `More: Halloween designs` collection link on Halloween items with no bundle (Shopify only).
-6. `One free personalization per file when the design has room for it. Message me after you order.`
-7. `SKU 0000`
+4. `More: Halloween designs` collection link on Halloween items with no bundle (Shopify only).
+5. `One free personalization per file when the design has room for it. Message me after you order.`
+6. `SKU 0000`
 
 ## Etsy
 - `etsy/descriptions.json` uses the workbench Load batch shape: `sku`, `title`, `description`, `flags`.
