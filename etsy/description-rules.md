@@ -28,6 +28,8 @@ Settled with the shop owner over batches 1–2. Every rewrite follows these.
    `License: commercial use of finished pieces allowed; no sharing or resale of files` ·
    `Instant download. Nothing ships.`
 4. `Also in:` links to bundles that contain it (Shopify only).
+   Bundles not on Etsy get `Only on cutreadydxf.com. Bundles and sets aren't sold on Etsy.` after
+   the intro, and a "cutreadydxf.com exclusive" pill on the preview graphic.
 5. `More: Halloween designs` collection link on Halloween items with no bundle (Shopify only).
 6. `One free personalization per file when the design has room for it. Message me after you order.`
 7. `SKU 0000`
@@ -35,7 +37,12 @@ Settled with the shop owner over batches 1–2. Every rewrite follows these.
 ## Etsy
 - `etsy/descriptions.json` uses the workbench Load batch shape: `sku`, `title`, `description`, `flags`.
 - Plain text: `<br>` → newline, paragraphs → blank line, links → their text.
-- Drop Shopify-only collection links. Keep "Also in" but flag it so bundle names get checked on Etsy.
+- Drop Shopify-only collection links and the "Also in" bundle line. Bundles are only sold on
+  cutreadydxf.com, and Etsy doesn't allow pointing buyers to another store.
+- Start with one line built from the Files line, for Etsy and Google search (both weight the first
+  160 characters): `DXF, DWG and SVG cut file for CNC plasma and laser.` Use "cut files" for sets,
+  packs and bundles. Fonts: `OTF and TTF font plus DXF and SVG cut files for CNC plasma and laser.`
+- Never mention cutreadydxf.com or any other website in Etsy text.
 
 ## Process
 - Batches of 5. Write → push to Shopify → read back and verify → append to the Etsy JSON → commit.
