@@ -6068,14 +6068,17 @@ async function handleBatchImport(file){
     };
   }
 
-  const bySku = {}; WB.listings.forEach(l=>bySku[l.sku]=l);
+  // Match on the SKU with leading zeros and case ignored, so "0495" in a
+  // batch finds a listing stored as "495" (and the reverse).
+  const skuKey = s=>String(s||'').trim().toUpperCase().replace(/^0+(?=\w)/,'');
+  const bySku = {}; WB.listings.forEach(l=>{ if(l.sku) bySku[skuKey(l.sku)]=l; });
   let matched=0, missing=[], flagged=0;
   const matchedSkus = [];
   rows.forEach(r=>{
-    const sku = String(r.sku||'').padStart(4,'0');
     if(!r.sku) return;
-    const l = bySku[sku];
-    if(!l){ missing.push(sku); return; }
+    const l = bySku[skuKey(r.sku)];
+    if(!l){ missing.push(String(r.sku)); return; }
+    const sku = l.sku;
     if(r.proposedTitle) l.proposedTitle = r.proposedTitle;
     if(r.description) l.description = r.description;
     if(Array.isArray(r.tags) && r.tags.length) l.tags = r.tags;
